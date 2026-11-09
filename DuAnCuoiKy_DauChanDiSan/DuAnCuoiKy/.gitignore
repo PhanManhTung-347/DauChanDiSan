@@ -1,0 +1,14 @@
+.vs/
+bin/
+obj/
+*.user
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+secrets.json
+service-account*.json
+firebase-adminsdk*.json
+
+**/App_Data/uploads/
