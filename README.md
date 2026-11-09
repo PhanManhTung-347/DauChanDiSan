@@ -45,33 +45,144 @@ Chẳng hạn, trước chuyến đi Hội An, người dùng có thể xem các
 
 | Thành phần | Công nghệ |
 | --- | --- |
-| **Giao diện web** | React, TypeScript, Vite |
-| **Backend** | C#, ASP.NET Core Web API, LINQ |
+| **Giao diện web** | React 19, TypeScript, Vite |
+| **Backend** | C#, ASP.NET Core 10 Web API |
 | **Cơ sở dữ liệu** | Microsoft SQL Server |
 | **Xác thực** | Firebase Authentication |
 | **Bản đồ và vị trí** | Google Maps, GPS |
-| **Trợ lý AI** | Mô hình phân loại ý định câu hỏi và Gemini |
+| **Trợ lý AI** | Mô hình Decision Tree (Python) + Gemini |
 | **Kiểm thử API** | Swagger UI |
 
-## 🚀 Chạy dự án trên máy cá nhân
+---
 
-1. Cài **.NET SDK**, **Node.js** và **SQL Server** theo phiên bản dự án yêu cầu.
-2. Chạy script SQL của dự án để tạo cơ sở dữ liệu, sau đó cập nhật chuỗi kết nối trong cấu hình backend.
-3. Cấu hình Firebase và Google Maps cho môi trường phát triển.
-4. Mở terminal trong thư mục chứa file `.csproj` của Web API và chạy:
+## 🚀 Hướng dẫn chạy dự án
 
-   ```bash
-   dotnet run
+### Yêu cầu cài đặt
+
+| Phần mềm | Phiên bản | Kiểm tra |
+| --- | --- | --- |
+| **.NET SDK** | 10.0 | `dotnet --version` |
+| **Node.js** | 20 trở lên | `node --version` |
+| **SQL Server** | 2019 trở lên | Mở SSMS kiểm tra |
+| **Python** | 3.9 trở lên | `python --version` |
+| **SSMS** | Bất kỳ | Để chạy script SQL |
+
+---
+
+### Bước 1 — Tạo cơ sở dữ liệu
+
+Mở **SSMS**, kết nối tới `localhost`, sau đó mở và chạy lần lượt từng file SQL dưới đây (nhấn **F5** để thực thi):
+
+```
+1. DauChanDiSan.sql       ← Tạo database và toàn bộ bảng
+2. Bosung1.sql            ← Bổ sung cấu trúc
+3. Bosung2.sql            ← Bổ sung cấu trúc
+4. SQLDuLieuMau.sql       ← Chèn dữ liệu mẫu
+```
+
+> ⚠️ Chạy đúng thứ tự, không bỏ bước nào.
+
+---
+
+### Bước 2 — Cấu hình Backend
+
+**2.1. Firebase — Service Account**
+
+1. Tải file key từ Firebase Console hoặc nhận từ nhóm.
+2. Tạo thư mục `D:\Secrets\` trên máy và lưu file vào:
    ```
-
-5. Mở terminal khác trong thư mục frontend chứa `package.json` và chạy:
-
-   ```bash
-   npm install
-   npm run dev
+   D:\Secrets\dauchandisan-bde24-firebase-adminsdk-fbsvc-8ca5d88f9f.json
    ```
+3. File `backend/DauChanDiSan.Api/Properties/launchSettings.json` đã cấu hình sẵn đúng đường dẫn này:
+   ```json
+   "GOOGLE_APPLICATION_CREDENTIALS": "D:\\Secrets\\dauchandisan-bde24-firebase-adminsdk-fbsvc-8ca5d88f9f.json"
+   ```
+   *(Nếu bạn lưu ở ổ đĩa hoặc đường dẫn khác, chỉ cần sửa lại dòng này trong `launchSettings.json` cho khớp).*
 
-6. Mở địa chỉ Vite in ra trong terminal để vào website. Nếu frontend dùng proxy, kiểm tra cổng API trong cấu hình Vite khớp với cổng backend đang chạy.
+**2.2. Firebase — Project ID**
+
+Mở file `backend/DauChanDiSan.Api/appsettings.json` và điền thông tin:
+
+```json
+"Firebase": {
+  "ProjectId": "dauchandisan-bde24",
+  "StorageBucket": "dauchandisan-bde24.appspot.com"
+}
+```
+
+**2.3. Cài đặt Trợ lý AI (Python)**
+
+Thư mục `HuanLuyen/` (chứa mô hình AI và code phân loại ý định) **đã được tích hợp sẵn** trong backend:
+```
+backend/DauChanDiSan.Api/HuanLuyen/
+├── predict_intent.py
+├── intent_tree.joblib
+├── train_intents.py
+└── dau_chan_di_san_intents.csv
+```
+
+Bạn chỉ cần cài các thư viện Python:
+
+```powershell
+pip install scikit-learn joblib pandas
+```
+
+Backend `appsettings.json` đã cấu hình sẵn:
+```json
+"LocalAI": {
+  "ScriptPath": "HuanLuyen/predict_intent.py",
+  "PythonExe": "python"
+}
+```
+
+> Nếu lệnh Python trên máy là `py` hoặc `python3`, hãy đổi giá trị `PythonExe` cho phù hợp.
+
+---
+
+### Bước 3 — Chạy Backend
+
+```powershell
+cd backend/DauChanDiSan.Api
+dotnet restore
+dotnet run --launch-profile https
+```
+
+Sau khi khởi động, kiểm tra:
+
+| Địa chỉ | Kết quả mong đợi |
+| --- | --- |
+| `http://localhost:5080/api/health` | `{"status":"ok"}` |
+| `http://localhost:5080/api/ai/trang-thai` | `{"daCauHinh":true,"cheDo":"LOCAL"}` |
+| `https://localhost:7152/swagger` | Giao diện Swagger UI |
+
+---
+
+### Bước 4 — Chạy Frontend
+
+Mở **terminal mới** (giữ backend đang chạy), sau đó:
+
+```powershell
+cd frontend
+npm ci
+npm run dev
+```
+
+Mở trình duyệt tại: **http://localhost:5173**
+
+> Vite đã cấu hình proxy sẵn — mọi request tới `/api` sẽ tự động chuyển sang backend tại `http://localhost:5080`.
+
+---
+
+### Thứ tự khởi động mỗi lần chạy lại
+
+```
+1. Đảm bảo SQL Server đang chạy
+2. Terminal 1 → cd backend/DauChanDiSan.Api → dotnet run --launch-profile https
+3. Terminal 2 → cd frontend → npm run dev
+4. Mở http://localhost:5173
+```
+
+---
 
 ## 🎓 Thành viên nhóm
 

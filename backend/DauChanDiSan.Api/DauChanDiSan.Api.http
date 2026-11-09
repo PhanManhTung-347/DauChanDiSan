@@ -1,0 +1,170 @@
+@base = http://localhost:5080
+@devKey = Dauchandisan@2026by5conditvang@@@123456
+@member = demo-khoi
+@admin = demo-admin
+@diSanId = 1
+@tripId = 1
+@conversationId = 1
+@demoConversationId = 1
+@dongGopId = 1
+
+### Kiểm tra SQL Server
+GET {{base}}/api/health
+
+### Tìm và lấy ID, tọa độ di sản
+GET {{base}}/api/di-san/pho-co-hoi-an
+
+### Gợi ý phổ biến
+GET {{base}}/api/goi-y
+
+### Kiểm tra quyền thành viên
+GET {{base}}/api/tai-khoan/toi
+X-Dev-Uid: {{member}}
+X-Dev-Key: {{devKey}}
+
+### Kiểm tra quyền quản trị
+GET {{base}}/api/quan-tri/tai-khoan
+X-Dev-Uid: {{admin}}
+X-Dev-Key: {{devKey}}
+
+### Kiểm tra cá nhân hóa trên tài khoản có dữ liệu mẫu
+GET {{base}}/api/goi-y?gioiHan=5
+X-Dev-Uid: demo-lan
+X-Dev-Key: {{devKey}}
+
+### Tạo hành trình thủ công
+POST {{base}}/api/hanh-trinh
+Content-Type: application/json
+X-Dev-Uid: {{member}}
+X-Dev-Key: {{devKey}}
+
+{
+  "tieuDe": "Một ngày ở Hội An",
+  "ngayBatDau": "2027-04-18",
+  "ngayKetThuc": "2027-04-18",
+  "diem": [
+    { "ngay": 1, "thuTu": 1, "diSanId": {{diSanId}}, "gio": "08:30:00" }
+  ]
+}
+
+### Thay tripId bằng ID vừa tạo
+GET {{base}}/api/hanh-trinh/{{tripId}}
+X-Dev-Uid: {{member}}
+X-Dev-Key: {{devKey}}
+
+### Danh sách câu hỏi và lựa chọn
+GET {{base}}/api/nhiem-vu/1/cau-hoi
+
+### Trải nghiệm đang công khai
+GET {{base}}/api/trai-nghiem
+
+### Xem hội thoại mẫu của demo-lan
+GET {{base}}/api/ai/hoi-thoai/{{demoConversationId}}
+X-Dev-Uid: demo-lan
+X-Dev-Key: {{devKey}}
+
+### Kiểm tra cấu hình trợ lý local
+GET {{base}}/api/ai/trang-thai
+
+### Kiểm tra riêng mô hình phân loại local
+POST {{base}}/api/ai/y-dinh
+Content-Type: application/json
+X-Dev-Uid: {{member}}
+X-Dev-Key: {{devKey}}
+
+{
+  "cauHoi": "Hai người đi Huế cuối tuần, cả nhóm có 2 triệu, xếp lịch giúp mình."
+}
+
+### Tạo hội thoại local rồi chép hoiThoaiId vào conversationId ở đầu file
+POST {{base}}/api/ai/hoi-thoai
+Content-Type: application/json
+X-Dev-Uid: {{member}}
+X-Dev-Key: {{devKey}}
+
+{
+  "tieuDe": "Kiểm tra trợ lý hành trình local"
+}
+
+### Kiểm tra chatbot, SQL và dự toán Huế
+POST {{base}}/api/ai/hoi-thoai/{{conversationId}}/tin-nhan
+Content-Type: application/json
+X-Dev-Uid: {{member}}
+X-Dev-Key: {{devKey}}
+
+{
+  "cauHoi": "Lên lịch khám phá Huế 2 ngày cho 2 người. Cả nhóm có 2 triệu, cần chỗ ở, chỗ ăn và di tích.",
+  "soNgay": 2
+}
+
+### Kiểm tra tách đúng Hội An trong khu vực Đà Nẵng
+POST {{base}}/api/ai/hoi-thoai/{{conversationId}}/tin-nhan
+Content-Type: application/json
+X-Dev-Uid: {{member}}
+X-Dev-Key: {{devKey}}
+
+{
+  "cauHoi": "Lập hành trình 2 ngày cho 2 người ở Hội An, có chỗ ở và chỗ ăn.",
+  "soNgay": 2
+}
+
+### Kiểm tra dịch vụ tại trung tâm Đà Nẵng
+POST {{base}}/api/ai/hoi-thoai/{{conversationId}}/tin-nhan
+Content-Type: application/json
+X-Dev-Uid: {{member}}
+X-Dev-Key: {{devKey}}
+
+{
+  "cauHoi": "Lên lịch đi Đà Nẵng 2 ngày cho 2 người, cần khách sạn và quán ăn.",
+  "soNgay": 2
+}
+
+### Kiểm tra tìm di sản Quảng Nam cũ
+POST {{base}}/api/ai/hoi-thoai/{{conversationId}}/tin-nhan
+Content-Type: application/json
+X-Dev-Uid: {{member}}
+X-Dev-Key: {{devKey}}
+
+{
+  "cauHoi": "Hãy gợi ý cho tôi các di tích nổi tiếng của tỉnh Quảng Nam cũ.",
+  "soNgay": 1
+}
+
+### Kiểm tra câu trả lời và nguồn đã được lưu vào hội thoại
+GET {{base}}/api/ai/hoi-thoai/{{conversationId}}
+X-Dev-Uid: {{member}}
+X-Dev-Key: {{devKey}}
+
+### Gửi bổ sung tư liệu cho di sản đang công khai
+POST {{base}}/api/dong-gop-di-san
+Content-Type: application/json
+X-Dev-Uid: {{member}}
+X-Dev-Key: {{devKey}}
+
+{
+  "maYeuCau": "cb447048-c85a-470e-9d48-057377866c1a",
+  "loai": "BO_SUNG",
+  "diSanId": {{diSanId}},
+  "tieuDe": "Thông tin bổ sung từ cộng đồng",
+  "noiDung": "Ví dụ ghi chú về một chi tiết kiến trúc."
+}
+
+### Xem bài của mình
+GET {{base}}/api/dong-gop-di-san/toi
+X-Dev-Uid: {{member}}
+X-Dev-Key: {{devKey}}
+
+### Xem bài đang chờ duyệt
+GET {{base}}/api/quan-tri/dong-gop-di-san?trangThai=CHO_DUYET
+X-Dev-Uid: {{admin}}
+X-Dev-Key: {{devKey}}
+
+### Thay dongGopId bằng ID vừa tạo rồi duyệt bổ sung
+PUT {{base}}/api/quan-tri/dong-gop-di-san/{{dongGopId}}/duyet
+Content-Type: application/json
+X-Dev-Uid: {{admin}}
+X-Dev-Key: {{devKey}}
+
+{
+  "quyetDinh": "DA_DUYET"
+}
