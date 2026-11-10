@@ -1,4 +1,15 @@
-﻿
+﻿/*
+    DẤU CHÂN DI SẢN | CÀI ĐẶT CSDL VÀ DỮ LIỆU DEMO
+
+    Chạy toàn bộ file trong một cửa sổ New Query của SSMS.
+    Phần khởi tạo giữ cơ chế kiểm tra PhienBanCSDL của dự án.
+    Hai bản bổ sung dịch vụ được hợp nhất trước dữ liệu hành trình và danh bạ.
+    Phần dữ liệu mẫu mặc định dùng tài khoản demo. Có thể điền @FirebaseUid.
+*/
+
+-- ================================================================
+-- 1. Khởi tạo và nâng cấp CSDL gốc
+-- ================================================================
 USE master;
 GO
 IF DB_ID(N'DauChanDiSan') IS NULL
@@ -2176,3 +2187,1528 @@ COMMIT;
 GO
 SET NOEXEC OFF;
 GO
+
+IF OBJECT_ID(N'dbo.PhienBanCSDL', N'U') IS NULL
+BEGIN
+    RAISERROR(N'Chưa cài được schema gốc. Hãy xem lỗi đầu tiên trong Messages.', 16, 1);
+    SET NOEXEC ON;
+END;
+GO
+IF NOT EXISTS (SELECT 1 FROM dbo.PhienBanCSDL WHERE PhienBan = '1.4.0')
+BEGIN
+    RAISERROR(N'Schema gốc chưa cập nhật đến 1.4.0. Hãy xem lỗi đầu tiên trong Messages.', 16, 1);
+    SET NOEXEC ON;
+END;
+GO
+
+-- ================================================================
+-- 2. Hợp nhất Bosung1 và Bosung2
+-- ================================================================
+USE [DauChanDiSan];
+GO
+
+SET NOCOUNT ON;
+
+IF DB_NAME() <> N'DauChanDiSan' OR @@TRANCOUNT <> 0
+BEGIN
+    RAISERROR(N'Hãy mở New Query trong database DauChanDiSan rồi chạy lại.', 16, 1);
+    RETURN;
+END;
+
+SET XACT_ABORT ON;
+
+DECLARE @ThemDuLieuDemo bit = 1;
+DECLARE @KetQuaKhoa int;
+DECLARE @TenCheck sysname;
+DECLARE @SoCheck int;
+DECLARE @Sql nvarchar(max);
+
+BEGIN TRY
+    BEGIN TRAN;
+
+    EXEC @KetQuaKhoa = sys.sp_getapplock
+        @Resource = N'DauChanDiSan.BoSungDichVuDuLich',
+        @LockMode = 'Exclusive',
+        @LockOwner = 'Transaction',
+        @LockTimeout = 10000;
+
+    IF @KetQuaKhoa < 0
+        THROW 51200, N'Không lấy được khóa cập nhật CSDL. Hãy thử lại.', 1;
+
+    IF OBJECT_ID(N'dbo.TinhThanh', N'U') IS NULL
+       OR OBJECT_ID(N'dbo.DiSan', N'U') IS NULL
+       OR OBJECT_ID(N'dbo.HanhTrinh', N'U') IS NULL
+       OR OBJECT_ID(N'dbo.DiemHanhTrinh', N'U') IS NULL
+       OR OBJECT_ID(N'dbo.TinNhanAI', N'U') IS NULL
+       OR OBJECT_ID(N'dbo.NguonTraLoiAI', N'U') IS NULL
+       OR OBJECT_ID(N'dbo.vw_NguCanhGemini', N'V') IS NULL
+        THROW 51201, N'Chưa tìm thấy đủ bảng và view của CSDL DauChanDiSan gốc.', 1;
+
+    /* 1. Danh mục khách sạn, homestay và quán ăn */
+
+    IF OBJECT_ID(N'dbo.DichVuDuLich', N'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.DichVuDuLich (
+            DichVuId int IDENTITY PRIMARY KEY,
+            TinhThanhId int NOT NULL REFERENCES dbo.TinhThanh(TinhThanhId),
+            Slug varchar(160) NOT NULL UNIQUE,
+            Loai varchar(16) NOT NULL,
+            Ten nvarchar(200) NOT NULL,
+            KhuVuc nvarchar(120) NULL,
+            DiaChi nvarchar(250) NOT NULL,
+            MoTa nvarchar(1000) NULL,
+            ViDo decimal(9,6) NULL,
+            KinhDo decimal(9,6) NULL,
+            DonViTinh varchar(16) NOT NULL,
+            SucChuaPhong smallint NULL,
+            TrangThai varchar(16) NOT NULL DEFAULT 'NHAP',
+            LaDuLieuDemo bit NOT NULL DEFAULT 0,
+            TaoLucUtc datetime2(3) NOT NULL DEFAULT SYSUTCDATETIME(),
+            CHECK (TrangThai IN ('NHAP', 'CONG_KHAI', 'AN')),
+            CHECK (
+                (ViDo IS NULL AND KinhDo IS NULL)
+                OR (ViDo IS NOT NULL AND KinhDo IS NOT NULL
+                    AND ViDo BETWEEN -90 AND 90
+                    AND KinhDo BETWEEN -180 AND 180)
+            ),
+            CHECK (
+                (Loai IN ('KHACH_SAN', 'HOMESTAY') AND DonViTinh = 'PHONG_DEM'
+                 AND SucChuaPhong IS NOT NULL AND SucChuaPhong BETWEEN 1 AND 30)
+                OR (Loai = 'QUAN_AN' AND DonViTinh = 'NGUOI_BUA'
+                    AND SucChuaPhong IS NULL)
+            )
+        );
+    END;
+
+    IF COL_LENGTH(N'dbo.DichVuDuLich', N'KhuVuc') IS NULL
+        ALTER TABLE dbo.DichVuDuLich ADD KhuVuc nvarchar(120) NULL;
+
+    IF OBJECT_ID(N'dbo.GiaDichVuDuLich', N'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.GiaDichVuDuLich (
+            GiaDichVuId int IDENTITY PRIMARY KEY,
+            DichVuId int NOT NULL REFERENCES dbo.DichVuDuLich(DichVuId),
+            NgayApDung date NOT NULL,
+            GiaVnd decimal(14,0) NOT NULL CHECK (GiaVnd >= 0),
+            NguonGia nvarchar(300) NULL,
+            CapNhatLucUtc datetime2(3) NOT NULL DEFAULT SYSUTCDATETIME(),
+            UNIQUE (DichVuId, NgayApDung)
+        );
+    END;
+
+    /* 2. Mở rộng hành trình và nguồn trả lời AI */
+
+    IF COL_LENGTH(N'dbo.HanhTrinh', N'SoNguoi') IS NULL
+        ALTER TABLE dbo.HanhTrinh ADD SoNguoi smallint NULL;
+
+    IF COL_LENGTH(N'dbo.HanhTrinh', N'NganSachVnd') IS NULL
+        ALTER TABLE dbo.HanhTrinh ADD NganSachVnd decimal(14,0) NULL;
+
+    IF COL_LENGTH(N'dbo.HanhTrinh', N'ChiPhiDiChuyenVnd') IS NULL
+        ALTER TABLE dbo.HanhTrinh ADD ChiPhiDiChuyenVnd decimal(14,0) NULL;
+
+    IF COL_LENGTH(N'dbo.DiemHanhTrinh', N'DichVuId') IS NULL
+        ALTER TABLE dbo.DiemHanhTrinh ADD DichVuId int NULL;
+
+    IF COL_LENGTH(N'dbo.DiemHanhTrinh', N'DonGiaDuKienVnd') IS NULL
+        ALTER TABLE dbo.DiemHanhTrinh ADD DonGiaDuKienVnd decimal(14,0) NULL;
+
+    IF COL_LENGTH(N'dbo.DiemHanhTrinh', N'SoLuongTinhGia') IS NULL
+        ALTER TABLE dbo.DiemHanhTrinh ADD SoLuongTinhGia int NULL;
+
+    IF COL_LENGTH(N'dbo.DiemHanhTrinh', N'DonViTinhGia') IS NULL
+        ALTER TABLE dbo.DiemHanhTrinh ADD DonViTinhGia varchar(16) NULL;
+
+    IF COL_LENGTH(N'dbo.NguonTraLoiAI', N'DichVuId') IS NULL
+        ALTER TABLE dbo.NguonTraLoiAI ADD DichVuId int NULL;
+
+    IF OBJECT_ID(N'dbo.FK_DiemHanhTrinh_DichVuDuLich', N'F') IS NULL
+        EXEC sys.sp_executesql N'
+            ALTER TABLE dbo.DiemHanhTrinh WITH CHECK
+            ADD CONSTRAINT FK_DiemHanhTrinh_DichVuDuLich
+                FOREIGN KEY (DichVuId) REFERENCES dbo.DichVuDuLich(DichVuId);';
+
+    IF OBJECT_ID(N'dbo.FK_NguonTraLoiAI_DichVuDuLich', N'F') IS NULL
+        EXEC sys.sp_executesql N'
+            ALTER TABLE dbo.NguonTraLoiAI WITH CHECK
+            ADD CONSTRAINT FK_NguonTraLoiAI_DichVuDuLich
+                FOREIGN KEY (DichVuId) REFERENCES dbo.DichVuDuLich(DichVuId);';
+
+    IF OBJECT_ID(N'dbo.CK_HanhTrinh_ChiPhi', N'C') IS NULL
+        EXEC sys.sp_executesql N'
+            ALTER TABLE dbo.HanhTrinh WITH CHECK
+            ADD CONSTRAINT CK_HanhTrinh_ChiPhi CHECK (
+                (SoNguoi IS NULL OR SoNguoi BETWEEN 1 AND 100)
+                AND (NganSachVnd IS NULL OR NganSachVnd >= 0)
+                AND (ChiPhiDiChuyenVnd IS NULL OR ChiPhiDiChuyenVnd >= 0)
+            );';
+
+    IF OBJECT_ID(N'dbo.CK_DiemHanhTrinh_ChiPhi', N'C') IS NULL
+        EXEC sys.sp_executesql N'
+            ALTER TABLE dbo.DiemHanhTrinh WITH CHECK
+            ADD CONSTRAINT CK_DiemHanhTrinh_ChiPhi CHECK (
+                (DonGiaDuKienVnd IS NULL AND SoLuongTinhGia IS NULL AND DonViTinhGia IS NULL)
+                OR (
+                    DonGiaDuKienVnd IS NOT NULL AND DonGiaDuKienVnd >= 0
+                    AND SoLuongTinhGia IS NOT NULL AND SoLuongTinhGia > 0
+                    AND DonViTinhGia IS NOT NULL
+                    AND DonViTinhGia IN (''NGUOI_LUOT'', ''PHONG_DEM'', ''NGUOI_BUA'')
+                )
+            );';
+
+    IF OBJECT_ID(N'dbo.CK_DiemHanhTrinh_MotLoaiDiem', N'C') IS NULL
+    BEGIN
+        SELECT @SoCheck = COUNT(*), @TenCheck = MAX(name)
+        FROM sys.check_constraints
+        WHERE parent_object_id = OBJECT_ID(N'dbo.DiemHanhTrinh')
+          AND definition LIKE N'%DiSanId%'
+          AND definition LIKE N'%TraiNghiemId%'
+          AND definition NOT LIKE N'%DichVuId%';
+
+        IF @SoCheck <> 1
+            THROW 51202, N'Cần kiểm tra ràng buộc loại điểm trên DiemHanhTrinh.', 1;
+
+        SET @Sql = N'ALTER TABLE dbo.DiemHanhTrinh DROP CONSTRAINT ' + QUOTENAME(@TenCheck) + N';';
+        EXEC sys.sp_executesql @Sql;
+
+        EXEC sys.sp_executesql N'
+            ALTER TABLE dbo.DiemHanhTrinh WITH CHECK
+            ADD CONSTRAINT CK_DiemHanhTrinh_MotLoaiDiem CHECK (
+                IIF(DiSanId IS NULL, 0, 1) + IIF(TraiNghiemId IS NULL, 0, 1)
+                + IIF(DichVuId IS NULL, 0, 1) = 1
+            );';
+    END;
+
+    IF OBJECT_ID(N'dbo.CK_NguonTraLoiAI_MotLoaiNguon', N'C') IS NULL
+    BEGIN
+        SELECT @SoCheck = COUNT(*), @TenCheck = MAX(name)
+        FROM sys.check_constraints
+        WHERE parent_object_id = OBJECT_ID(N'dbo.NguonTraLoiAI')
+          AND definition LIKE N'%DiSanId%'
+          AND definition LIKE N'%TraiNghiemId%'
+          AND definition LIKE N'%TuLieuId%'
+          AND definition NOT LIKE N'%DichVuId%';
+
+        IF @SoCheck <> 1
+            THROW 51203, N'Cần kiểm tra ràng buộc loại nguồn trên NguonTraLoiAI.', 1;
+
+        SET @Sql = N'ALTER TABLE dbo.NguonTraLoiAI DROP CONSTRAINT ' + QUOTENAME(@TenCheck) + N';';
+        EXEC sys.sp_executesql @Sql;
+
+        EXEC sys.sp_executesql N'
+            ALTER TABLE dbo.NguonTraLoiAI WITH CHECK
+            ADD CONSTRAINT CK_NguonTraLoiAI_MotLoaiNguon CHECK (
+                IIF(DiSanId IS NULL, 0, 1) + IIF(TraiNghiemId IS NULL, 0, 1)
+                + IIF(TuLieuId IS NULL, 0, 1) + IIF(DichVuId IS NULL, 0, 1) = 1
+            );';
+    END;
+
+    IF OBJECT_ID(N'dbo.CK_TinNhanAI_NhaCungCap', N'C') IS NULL
+    BEGIN
+        SELECT @SoCheck = COUNT(*), @TenCheck = MAX(name)
+        FROM sys.check_constraints
+        WHERE parent_object_id = OBJECT_ID(N'dbo.TinNhanAI')
+          AND definition LIKE N'%NhaCungCap%'
+          AND definition LIKE N'%GEMINI%'
+          AND definition NOT LIKE N'%MaMoHinh%'
+          AND definition NOT LIKE N'%LOCAL%';
+
+        IF @SoCheck <> 1
+            THROW 51204, N'Cần kiểm tra ràng buộc nhà cung cấp trên TinNhanAI.', 1;
+
+        SET @Sql = N'ALTER TABLE dbo.TinNhanAI DROP CONSTRAINT ' + QUOTENAME(@TenCheck) + N';';
+        EXEC sys.sp_executesql @Sql;
+
+        ALTER TABLE dbo.TinNhanAI WITH CHECK
+        ADD CONSTRAINT CK_TinNhanAI_NhaCungCap CHECK (NhaCungCap IN ('GEMINI', 'LOCAL'));
+    END;
+
+    /* 3. View và thủ tục đọc dữ liệu */
+
+    EXEC sys.sp_executesql N'
+    CREATE OR ALTER VIEW dbo.vw_DichVuDuLichCongKhai AS
+    SELECT d.DichVuId, d.TinhThanhId, t.Ten AS TenTinhThanh, d.Slug, d.Loai,
+           d.Ten, d.DiaChi, d.MoTa, d.ViDo, d.KinhDo, d.DonViTinh,
+           d.SucChuaPhong, d.LaDuLieuDemo, d.KhuVuc, t.Ten AS TinhThanh
+    FROM dbo.DichVuDuLich d
+    JOIN dbo.TinhThanh t ON t.TinhThanhId = d.TinhThanhId
+    WHERE d.TrangThai = ''CONG_KHAI'' AND t.HoatDong = 1;';
+
+    EXEC sys.sp_executesql N'
+    CREATE OR ALTER VIEW dbo.vw_NguCanhTroLy AS
+    SELECT LoaiNguon, NguonId, DiSanId, TinhThanhId, TieuDe, NoiDung, UrlNguon,
+           CONVERT(bit, 0) AS LaDuLieuDemo
+    FROM dbo.vw_NguCanhGemini
+    UNION ALL
+    SELECT ''DICH_VU'', DichVuId, NULL, TinhThanhId,
+           CONVERT(nvarchar(220), CONCAT(CASE WHEN LaDuLieuDemo = 1 THEN N''[DEMO] '' END, Ten)),
+           CONVERT(nvarchar(max), CONCAT(KhuVuc, N'' | '', DiaChi, N'' | '', MoTa)),
+           CONVERT(nvarchar(1000), NULL),
+           LaDuLieuDemo
+    FROM dbo.vw_DichVuDuLichCongKhai;';
+
+    EXEC sys.sp_executesql N'
+    CREATE OR ALTER PROCEDURE dbo.usp_LayDichVuDuLich
+        @TinhThanhId int, @Loai varchar(16) = NULL, @Ngay date = NULL,
+        @GioiHan int = 20, @BaoGomDemo bit = 0, @KhuVuc nvarchar(120) = NULL
+    AS
+    BEGIN
+        SET NOCOUNT ON;
+
+        IF @TinhThanhId IS NULL OR @GioiHan IS NULL OR @GioiHan NOT BETWEEN 1 AND 100
+            THROW 51205, N''Cần tỉnh thành và giới hạn kết quả từ 1 đến 100.'', 1;
+
+        IF @Loai IS NOT NULL AND @Loai NOT IN (''KHACH_SAN'', ''HOMESTAY'', ''QUAN_AN'')
+            THROW 52106, N''Loại dịch vụ không hợp lệ.'', 1;
+
+        SET @Ngay = COALESCE(@Ngay, CONVERT(date, DATEADD(MINUTE, 420, SYSUTCDATETIME())));
+
+        SELECT TOP (@GioiHan) d.*, g.GiaVnd, g.NgayApDung, g.NguonGia, g.CapNhatLucUtc
+        FROM dbo.vw_DichVuDuLichCongKhai d
+        OUTER APPLY (
+            SELECT TOP (1) g.GiaVnd, g.NgayApDung, g.NguonGia, g.CapNhatLucUtc
+            FROM dbo.GiaDichVuDuLich g
+            WHERE g.DichVuId = d.DichVuId AND g.NgayApDung <= @Ngay
+            ORDER BY g.NgayApDung DESC
+        ) g
+        WHERE d.TinhThanhId = @TinhThanhId
+          AND (@Loai IS NULL OR d.Loai = @Loai)
+          AND (@KhuVuc IS NULL OR d.KhuVuc = @KhuVuc)
+          AND (@BaoGomDemo = 1 OR d.LaDuLieuDemo = 0)
+        ORDER BY d.LaDuLieuDemo, CASE WHEN g.GiaVnd IS NULL THEN 1 ELSE 0 END,
+                 g.GiaVnd, d.DichVuId;
+    END;';
+
+    EXEC sys.sp_executesql N'
+    CREATE OR ALTER VIEW dbo.vw_ChiPhiHanhTrinh AS
+    SELECT h.HanhTrinhId, h.NguoiDungId, h.SoNguoi, h.NganSachVnd, h.ChiPhiDiChuyenVnd,
+           COALESCE(p.ChiPhiCacDiemVnd, 0) AS ChiPhiCacDiemVnd,
+           COALESCE(p.ChiPhiCacDiemVnd, 0) + COALESCE(h.ChiPhiDiChuyenVnd, 0) AS TamTinhVnd,
+           COALESCE(p.SoDiemChuaCoGia, 0) AS SoDiemChuaCoGia,
+           COALESCE(p.ChiPhiCacDiemVnd, 0) AS ChiPhiCacDiemDaCoGiaVnd,
+           COALESCE(p.ChiPhiCacDiemVnd, 0) + COALESCE(h.ChiPhiDiChuyenVnd, 0) AS TongDaCoGiaVnd
+    FROM dbo.HanhTrinh h
+    LEFT JOIN (
+        SELECT HanhTrinhId,
+               SUM(DonGiaDuKienVnd * SoLuongTinhGia) AS ChiPhiCacDiemVnd,
+               COUNT_BIG(CASE WHEN DonGiaDuKienVnd IS NULL THEN 1 END) AS SoDiemChuaCoGia
+        FROM dbo.DiemHanhTrinh
+        GROUP BY HanhTrinhId
+    ) p ON p.HanhTrinhId = h.HanhTrinhId;';
+
+    /* 4. Lưu tin nhắn trợ lý, giữ nguyên cách gọi Gemini hiện tại */
+
+    EXEC sys.sp_executesql N'
+    CREATE OR ALTER PROCEDURE dbo.usp_LuuTinNhanGemini
+        @NguoiDungId int, @HoiThoaiId bigint, @Vai varchar(12), @NoiDung nvarchar(max),
+        @MaMoHinh varchar(100) = NULL, @TokenVao int = NULL, @TokenRa int = NULL,
+        @DeXuatHanhTrinhJson nvarchar(max) = NULL, @NguonJson nvarchar(max) = NULL,
+        @TinNhanAIId bigint = NULL OUTPUT, @TraKetQua bit = 1,
+        @NhaCungCap varchar(16) = ''GEMINI''
+    AS
+    BEGIN
+        SET NOCOUNT ON;
+        SET XACT_ABORT ON;
+        SET @TinNhanAIId = NULL;
+
+        IF @Vai IS NULL OR @Vai NOT IN (''USER'', ''ASSISTANT'')
+            THROW 51131, N''Vai trò tin nhắn không hợp lệ.'', 1;
+
+        IF @Vai = ''ASSISTANT'' AND (@NhaCungCap IS NULL OR @NhaCungCap NOT IN (''GEMINI'', ''LOCAL''))
+            THROW 51131, N''Nhà cung cấp mô hình không hợp lệ.'', 1;
+
+        IF @NguonJson IS NOT NULL AND (
+            @Vai <> ''ASSISTANT'' OR ISJSON(@NguonJson) <> 1
+            OR LEFT(LTRIM(@NguonJson), 1) <> ''[''
+        )
+            THROW 51131, N''Nguồn phải là mảng JSON của tin nhắn trợ lý.'', 1;
+
+        IF @DeXuatHanhTrinhJson IS NOT NULL AND (
+            @Vai <> ''ASSISTANT'' OR ISJSON(@DeXuatHanhTrinhJson) <> 1
+            OR LEFT(LTRIM(@DeXuatHanhTrinhJson), 1) <> ''{''
+        )
+            THROW 51132, N''Kế hoạch phải là một đối tượng JSON.'', 1;
+
+        DECLARE @Nguon TABLE (ThuTu int PRIMARY KEY, Loai varchar(16), Id int);
+
+        IF @NguonJson IS NOT NULL
+            INSERT @Nguon (ThuTu, Loai, Id)
+            SELECT CONVERT(int, j.[key]) + 1, p.Loai, p.Id
+            FROM OPENJSON(@NguonJson) j
+            OUTER APPLY OPENJSON(CASE WHEN j.[type] = 5 THEN j.value ELSE N''{}'' END)
+                WITH (Loai varchar(16) ''$.loai'', Id int ''$.id'') p;
+
+        IF (SELECT COUNT(*) FROM @Nguon) > 40
+           OR EXISTS (SELECT 1 FROM @Nguon GROUP BY Loai, Id HAVING COUNT(*) > 1)
+            THROW 51133, N''Danh sách nguồn bị trùng hoặc vượt giới hạn 40 mục.'', 1;
+
+        BEGIN TRAN;
+
+        IF NOT EXISTS (
+            SELECT 1
+            FROM dbo.HoiThoaiAI h WITH (UPDLOCK, HOLDLOCK)
+            JOIN dbo.NguoiDung u ON u.NguoiDungId = h.NguoiDungId AND u.HoatDong = 1
+            WHERE h.HoiThoaiId = @HoiThoaiId AND h.NguoiDungId = @NguoiDungId AND h.DaLuuTru = 0
+        )
+            THROW 51134, N''Hội thoại không khả dụng cho tài khoản này.'', 1;
+
+        INSERT dbo.TinNhanAI (
+            HoiThoaiId, NguoiDungId, Vai, NoiDung, NhaCungCap, MaMoHinh,
+            TokenVao, TokenRa, DeXuatHanhTrinhJson
+        )
+        VALUES (
+            @HoiThoaiId, @NguoiDungId, @Vai, @NoiDung,
+            CASE WHEN @Vai = ''ASSISTANT'' THEN @NhaCungCap END,
+            @MaMoHinh, @TokenVao, @TokenRa, @DeXuatHanhTrinhJson
+        );
+
+        SET @TinNhanAIId = CONVERT(bigint, SCOPE_IDENTITY());
+
+        INSERT dbo.NguonTraLoiAI (
+            TinNhanAIId, NguoiDungId, ThuTu, DiSanId, TraiNghiemId, TuLieuId,
+            TieuDeKhiTrich, UrlKhiTrich, DichVuId
+        )
+        SELECT @TinNhanAIId, @NguoiDungId, n.ThuTu,
+               CASE WHEN n.Loai = ''DI_SAN'' THEN n.Id END,
+               CASE WHEN n.Loai = ''TRAI_NGHIEM'' THEN n.Id END,
+               CASE WHEN n.Loai = ''TU_LIEU'' THEN n.Id END,
+               v.TieuDe, v.UrlNguon,
+               CASE WHEN n.Loai = ''DICH_VU'' THEN n.Id END
+        FROM @Nguon n
+        JOIN dbo.vw_NguCanhTroLy v ON v.LoaiNguon = n.Loai AND v.NguonId = n.Id
+        WHERE n.Loai <> ''DICH_VU'' OR @NhaCungCap = ''LOCAL'';
+
+        IF @@ROWCOUNT <> (SELECT COUNT(*) FROM @Nguon)
+            THROW 51135, N''Có nguồn không tồn tại, chưa công khai hoặc sai loại.'', 1;
+
+        COMMIT;
+        IF @TraKetQua = 1 SELECT @TinNhanAIId AS TinNhanAIId;
+    END;';
+
+    /* 5. Lưu hành trình có khách sạn, quán ăn và dự toán */
+
+    EXEC sys.sp_executesql N'
+    CREATE OR ALTER PROCEDURE dbo.usp_TaoHanhTrinh
+        @NguoiDungId int, @TieuDe nvarchar(160), @NgayBatDau date, @NgayKetThuc date,
+        @MoTa nvarchar(1000) = NULL, @TinNhanAIId bigint = NULL,
+        @KeHoachJson nvarchar(max) = NULL, @HanhTrinhId bigint = NULL OUTPUT, @TraKetQua bit = 1
+    AS
+    BEGIN
+        SET NOCOUNT ON;
+        SET XACT_ABORT ON;
+        SET @HanhTrinhId = NULL;
+
+        DECLARE @SoNgay int = DATEDIFF(DAY, @NgayBatDau, @NgayKetThuc) + 1;
+        IF @SoNgay IS NULL OR @SoNgay NOT BETWEEN 1 AND 90
+            THROW 51136, N''Hành trình phải từ 1 đến 90 ngày.'', 1;
+
+        BEGIN TRAN;
+
+        IF NOT EXISTS (
+            SELECT 1 FROM dbo.NguoiDung WHERE NguoiDungId = @NguoiDungId AND HoatDong = 1
+        )
+            THROW 51103, N''Tài khoản không tồn tại hoặc không hoạt động.'', 1;
+
+        IF @TinNhanAIId IS NOT NULL
+        BEGIN
+            DECLARE @JsonDaLuu nvarchar(max);
+
+            SELECT @JsonDaLuu = DeXuatHanhTrinhJson
+            FROM dbo.TinNhanAI
+            WHERE TinNhanAIId = @TinNhanAIId AND NguoiDungId = @NguoiDungId AND Vai = ''ASSISTANT'';
+
+            IF @JsonDaLuu IS NULL
+                THROW 51137, N''Tin nhắn không chứa đề xuất của tài khoản này.'', 1;
+
+            SET @KeHoachJson = COALESCE(@KeHoachJson, @JsonDaLuu);
+        END;
+
+        DECLARE @SoNguoi smallint, @NganSachVnd decimal(14,0), @ChiPhiDiChuyenVnd decimal(14,0);
+        DECLARE @Diem TABLE (
+            Ngay int, ThuTu int, DiSanId int, TraiNghiemId int, DichVuId int,
+            Gio nvarchar(50), GhiChu nvarchar(500),
+            DonGiaVnd decimal(14,0), SoLuongTinhGia int, DonViTinhGia varchar(16)
+        );
+
+        IF @KeHoachJson IS NOT NULL
+        BEGIN
+            IF ISJSON(@KeHoachJson) <> 1 OR LEFT(LTRIM(@KeHoachJson), 1) <> ''{''
+                THROW 51138, N''Kế hoạch phải là đối tượng JSON.'', 1;
+
+            DECLARE @Mang nvarchar(max) = JSON_QUERY(@KeHoachJson, ''$.diem'');
+
+            IF @Mang IS NULL OR LEFT(LTRIM(@Mang), 1) <> ''[''
+                THROW 51138, N''Kế hoạch phải có mảng diem.'', 1;
+
+            SELECT @SoNguoi = SoNguoi, @NganSachVnd = NganSachVnd, @ChiPhiDiChuyenVnd = ChiPhiDiChuyenVnd
+            FROM OPENJSON(@KeHoachJson) WITH (
+                SoNguoi smallint ''$.soNguoi'',
+                NganSachVnd decimal(14,0) ''$.nganSachVnd'',
+                ChiPhiDiChuyenVnd decimal(14,0) ''$.chiPhiDiChuyenVnd''
+            );
+
+            INSERT @Diem
+            SELECT Ngay, ThuTu, DiSanId, TraiNghiemId, DichVuId, Gio, GhiChu,
+                   DonGiaVnd, SoLuongTinhGia, DonViTinhGia
+            FROM OPENJSON(@Mang) WITH (
+                Ngay int ''$.ngay'', ThuTu int ''$.thuTu'',
+                DiSanId int ''$.diSanId'', TraiNghiemId int ''$.traiNghiemId'',
+                DichVuId int ''$.dichVuId'', Gio nvarchar(50) ''$.gio'',
+                GhiChu nvarchar(500) ''$.ghiChu'', DonGiaVnd decimal(14,0) ''$.donGiaVnd'',
+                SoLuongTinhGia int ''$.soLuongTinhGia'', DonViTinhGia varchar(16) ''$.donViTinhGia''
+            );
+
+            IF (SELECT COUNT(*) FROM @Diem) > 300
+               OR EXISTS (SELECT 1 FROM @Diem GROUP BY Ngay, ThuTu HAVING COUNT(*) > 1)
+               OR EXISTS (
+                   SELECT 1
+                   FROM @Diem x
+                   LEFT JOIN dbo.vw_DiSanCongKhai d ON d.DiSanId = x.DiSanId
+                   LEFT JOIN dbo.vw_TraiNghiemCongKhai e ON e.TraiNghiemId = x.TraiNghiemId
+                   LEFT JOIN dbo.vw_DichVuDuLichCongKhai v ON v.DichVuId = x.DichVuId
+                   WHERE x.Ngay IS NULL OR x.Ngay NOT BETWEEN 1 AND @SoNgay
+                      OR x.ThuTu IS NULL OR x.ThuTu NOT BETWEEN 1 AND 100
+                      OR (x.Gio IS NOT NULL AND TRY_CONVERT(time(0), x.Gio) IS NULL)
+                      OR IIF(x.DiSanId IS NULL, 0, 1) + IIF(x.TraiNghiemId IS NULL, 0, 1)
+                         + IIF(x.DichVuId IS NULL, 0, 1) <> 1
+                      OR (x.DiSanId IS NOT NULL AND d.DiSanId IS NULL)
+                      OR (x.TraiNghiemId IS NOT NULL AND e.TraiNghiemId IS NULL)
+                      OR (x.DichVuId IS NOT NULL AND v.DichVuId IS NULL)
+                      OR (x.DichVuId IS NOT NULL AND x.DonViTinhGia IS NOT NULL
+                          AND x.DonViTinhGia <> v.DonViTinh)
+                      OR (x.DichVuId IS NULL AND x.DonViTinhGia IS NOT NULL
+                          AND x.DonViTinhGia <> ''NGUOI_LUOT'')
+               )
+                THROW 51139, N''Ngày, thứ tự, giờ, địa điểm hoặc đơn vị tính giá không hợp lệ.'', 1;
+        END;
+
+        INSERT dbo.HanhTrinh (
+            NguoiDungId, TieuDe, MoTa, NgayBatDau, NgayKetThuc, TinNhanAIId,
+            SoNguoi, NganSachVnd, ChiPhiDiChuyenVnd
+        )
+        VALUES (
+            @NguoiDungId, @TieuDe, @MoTa, @NgayBatDau, @NgayKetThuc, @TinNhanAIId,
+            @SoNguoi, @NganSachVnd, @ChiPhiDiChuyenVnd
+        );
+
+        SET @HanhTrinhId = CONVERT(bigint, SCOPE_IDENTITY());
+
+        INSERT dbo.DiemHanhTrinh (
+            HanhTrinhId, NgayDuKien, ThuTu, DiSanId, TraiNghiemId, GioDuKien, GhiChu,
+            DichVuId, DonGiaDuKienVnd, SoLuongTinhGia, DonViTinhGia
+        )
+        SELECT @HanhTrinhId, DATEADD(DAY, Ngay - 1, @NgayBatDau), ThuTu,
+               DiSanId, TraiNghiemId, TRY_CONVERT(time(0), Gio), GhiChu,
+               DichVuId, DonGiaVnd, SoLuongTinhGia, DonViTinhGia
+        FROM @Diem;
+
+        COMMIT;
+        IF @TraKetQua = 1 SELECT @HanhTrinhId AS HanhTrinhId;
+    END;';
+
+    /* 6. Dữ liệu giả lập cho các khu vực demo */
+
+    IF @ThemDuLieuDemo = 1
+    BEGIN
+        EXEC sys.sp_executesql N'
+        DECLARE @Khu TABLE (
+            MaKhu varchar(16) PRIMARY KEY, KhuVuc nvarchar(120),
+            SlugDiSan varchar(160), MaTinhMacDinh varchar(32),
+            ViDo decimal(9,6), KinhDo decimal(9,6), TinhThanhId int NULL
+        );
+
+        INSERT @Khu (MaKhu, KhuVuc, SlugDiSan, MaTinhMacDinh, ViDo, KinhDo)
+        VALUES
+            (''HUE'',      N''Đại Nội Huế'',          ''dai-noi-hue'',       ''HUE'',     16.467000, 107.590000),
+            (''DA_NANG'',  N''Trung tâm Đà Nẵng'',    NULL,                  ''DA_NANG'', 16.067500, 108.211500),
+            (''HOI_AN'',   N''Phố cổ Hội An'',        ''pho-co-hoi-an'',     ''DA_NANG'', 15.879000, 108.328000),
+            (''THANH_HA'', N''Làng gốm Thanh Hà'',    ''lang-gom-thanh-ha'',  ''DA_NANG'', 15.880000, 108.296000),
+            (''MY_SON'',   N''Thánh địa Mỹ Sơn'',     ''thanh-dia-my-son'',  ''DA_NANG'', 15.778000, 108.133000),
+            (''BAT_TRANG'',N''Làng gốm Bát Tràng'',   ''lang-gom-bat-trang'', ''HA_NOI'',  20.977000, 105.913000);
+
+        UPDATE k
+        SET TinhThanhId = COALESCE(d.TinhThanhId, t.TinhThanhId)
+        FROM @Khu k
+        LEFT JOIN dbo.DiSan d ON d.Slug = k.SlugDiSan
+        LEFT JOIN dbo.TinhThanh t ON t.Ma = k.MaTinhMacDinh;
+
+        IF EXISTS (SELECT 1 FROM @Khu WHERE TinhThanhId IS NULL)
+            THROW 51206, N''Thiếu tỉnh thành hoặc di sản cần để gắn dịch vụ mẫu.'', 1;
+
+        DECLARE @Mau TABLE (
+            MaKhu varchar(16), Slug varchar(160) PRIMARY KEY, Loai varchar(16),
+            Ten nvarchar(200), GiaVnd decimal(14,0), SucChuaPhong smallint NULL
+        );
+
+        INSERT @Mau VALUES
+            (''HUE'', ''demo-hue-khach-san-01'', ''KHACH_SAN'', N''Khách sạn Sông Hương'', 420000, 2),
+            (''HUE'', ''demo-hue-homestay-01'',  ''HOMESTAY'',  N''Homestay Vườn Huế'',   320000, 2),
+            (''HUE'', ''demo-hue-quan-an-01'',   ''QUAN_AN'',   N''Bếp Cố Đô'',            65000, NULL),
+            (''HUE'', ''demo-hue-quan-an-02'',   ''QUAN_AN'',   N''[DEMO] Quán Bún Sáng'',45000, NULL),
+
+            (''DA_NANG'', ''demo-da-nang-khach-san-01'', ''KHACH_SAN'', N''Khách sạn Bờ Hàn'', 490000, 2),
+            (''DA_NANG'', ''demo-da-nang-homestay-01'',  ''HOMESTAY'',  N''Homestay Gió Sông'', 370000, 2),
+            (''DA_NANG'', ''demo-da-nang-quan-an-01'',   ''QUAN_AN'',   N''Bếp Mì Quảng'',      60000, NULL),
+
+            (''HOI_AN'', ''demo-hoi-an-khach-san-01'', ''KHACH_SAN'', N''Khách sạn Đèn Phố'', 460000, 2),
+            (''HOI_AN'', ''demo-hoi-an-homestay-01'',  ''HOMESTAY'',  N''Homestay Hiên Ngói'', 350000, 2),
+            (''HOI_AN'', ''demo-hoi-an-quan-an-01'',   ''QUAN_AN'',   N''Bếp Cao Lầu Phố'',    70000, NULL),
+
+            (''THANH_HA'', ''demo-thanh-ha-khach-san-01'', ''KHACH_SAN'', N''Khách sạn Bến Gốm'', 400000, 2),
+            (''THANH_HA'', ''demo-thanh-ha-homestay-01'',  ''HOMESTAY'',  N''Homestay Sân Gốm'',  290000, 2),
+            (''THANH_HA'', ''demo-thanh-ha-quan-an-01'',   ''QUAN_AN'',   N''Bếp Nhà Gốm'',        55000, NULL),
+
+            (''MY_SON'', ''demo-my-son-khach-san-01'', ''KHACH_SAN'', N''Khách sạn Đường Tháp'', 390000, 2),
+            (''MY_SON'', ''demo-my-son-homestay-01'',  ''HOMESTAY'',  N''Homestay Vườn Tháp'',   280000, 2),
+            (''MY_SON'', ''demo-my-son-quan-an-01'',   ''QUAN_AN'',   N''Bếp Xứ Quảng'',           60000, NULL),
+
+            (''BAT_TRANG'', ''demo-bat-trang-khach-san-01'', ''KHACH_SAN'', N''Khách sạn Bến Sông'', 440000, 2),
+            (''BAT_TRANG'', ''demo-bat-trang-homestay-01'',  ''HOMESTAY'',  N''Homestay Sân Men'',   330000, 2),
+            (''BAT_TRANG'', ''demo-bat-trang-quan-an-01'',   ''QUAN_AN'',   N''Bếp Ven Làng'',         65000, NULL);
+
+        INSERT dbo.DichVuDuLich (
+            TinhThanhId, Slug, Loai, Ten, KhuVuc, DiaChi, MoTa,
+            ViDo, KinhDo, DonViTinh, SucChuaPhong, TrangThai, LaDuLieuDemo
+        )
+        SELECT k.TinhThanhId, m.Slug, m.Loai, m.Ten, k.KhuVuc,
+               CONCAT(N''Vị trí giả lập quanh '', k.KhuVuc),
+               CASE WHEN m.Loai = ''QUAN_AN''
+                    THEN N''Quán ăn giả lập. Giá tính cho một người trong một bữa.''
+                    ELSE N''Chỗ ở giả lập. Giá tính theo phòng hai người cho một đêm.'' END,
+               k.ViDo + CASE m.Loai WHEN ''HOMESTAY'' THEN 0.002 WHEN ''QUAN_AN'' THEN -0.001 ELSE 0 END,
+               k.KinhDo + CASE m.Loai WHEN ''HOMESTAY'' THEN -0.002 WHEN ''QUAN_AN'' THEN 0.001 ELSE 0 END,
+               CASE WHEN m.Loai = ''QUAN_AN'' THEN ''NGUOI_BUA'' ELSE ''PHONG_DEM'' END,
+               m.SucChuaPhong, ''CONG_KHAI'', 1
+        FROM @Mau m
+        JOIN @Khu k ON k.MaKhu = m.MaKhu
+        WHERE NOT EXISTS (SELECT 1 FROM dbo.DichVuDuLich d WHERE d.Slug = m.Slug);
+
+        -- Gắn khu vực cho dữ liệu Huế đã thêm ở lần chạy trước, nếu có.
+        UPDATE d SET KhuVuc = N''Đại Nội Huế''
+        FROM dbo.DichVuDuLich d
+        WHERE d.LaDuLieuDemo = 1 AND d.KhuVuc IS NULL
+          AND d.Slug IN (
+              ''demo-hue-khach-san-01'', ''demo-hue-homestay-01'',
+              ''demo-hue-quan-an-01'', ''demo-hue-quan-an-02''
+          );
+
+        DECLARE @NgayGia date = CONVERT(date, ''20250101'', 112);
+
+        INSERT dbo.GiaDichVuDuLich (DichVuId, NgayApDung, GiaVnd, NguonGia)
+        SELECT d.DichVuId, @NgayGia, m.GiaVnd, N''Giá giả lập cho đồ án Dấu Chân Di Sản''
+        FROM @Mau m
+        JOIN dbo.DichVuDuLich d ON d.Slug = m.Slug AND d.LaDuLieuDemo = 1
+        WHERE NOT EXISTS (
+            SELECT 1 FROM dbo.GiaDichVuDuLich g
+            WHERE g.DichVuId = d.DichVuId AND g.NgayApDung = @NgayGia
+        );';
+    END;
+
+    COMMIT;
+    PRINT N'Đã cập nhật CSDL hành trình và dịch vụ du lịch.';
+END TRY
+BEGIN CATCH
+    IF XACT_STATE() <> 0 ROLLBACK;
+    THROW;
+END CATCH;
+GO
+SET XACT_ABORT ON;
+BEGIN TRAN;
+
+DECLARE @Hue int = (SELECT TinhThanhId FROM dbo.TinhThanh WHERE Ma='HUE');
+DECLARE @Loai int = (SELECT LoaiDiSanId FROM dbo.DiSan WHERE Slug='dai-noi-hue');
+
+IF @Hue IS NULL OR @Loai IS NULL
+BEGIN
+    ROLLBACK;
+    THROW 51301,N'Cần có tỉnh thành Huế và di sản Đại Nội trước khi bổ sung dữ liệu demo.',1;
+END;
+
+IF NOT EXISTS (
+    SELECT 1 FROM dbo.DiSan WITH (UPDLOCK,HOLDLOCK)
+    WHERE Slug='chua-thien-mu'
+       OR (TinhThanhId=@Hue AND Ten COLLATE Latin1_General_100_CI_AI_SC = N'Chùa Thiên Mụ')
+)
+BEGIN
+    INSERT dbo.DiSan (
+        TinhThanhId,LoaiDiSanId,Slug,Ten,TomTat,DiaChi,ViDo,KinhDo,ThoiLuongPhut,TrangThai
+    )
+    VALUES (
+        @Hue,@Loai,'chua-thien-mu',N'Chùa Thiên Mụ',
+        N'Điểm tham quan bổ sung để thử lịch Huế nhiều ngày.',
+        N'Khu vực đồi Hà Khê, Huế',16.453600,107.545000,60,'CONG_KHAI'
+    );
+END;
+
+COMMIT;
+
+GO
+
+IF OBJECT_ID(N'dbo.DichVuDuLich', N'U') IS NULL
+   OR COL_LENGTH(N'dbo.DichVuDuLich', N'KhuVuc') IS NULL
+   OR COL_LENGTH(N'dbo.DiemHanhTrinh', N'DichVuId') IS NULL
+   OR NOT EXISTS (
+       SELECT 1 FROM sys.parameters
+       WHERE object_id = OBJECT_ID(N'dbo.usp_LayDichVuDuLich', N'P') AND name = N'@KhuVuc'
+   )
+BEGIN
+    RAISERROR(N'Bổ sung dịch vụ chưa hoàn tất. Hãy xem lỗi đầu tiên trong Messages.', 16, 1);
+    SET NOEXEC ON;
+END;
+GO
+
+-- ================================================================
+-- 3. Dữ liệu mẫu theo tài khoản demo
+-- ================================================================
+USE [DauChanDiSan];
+GO
+
+SET NOCOUNT ON;
+SET XACT_ABORT ON;
+SET ANSI_NULLS ON;
+SET QUOTED_IDENTIFIER ON;
+SET ANSI_PADDING ON;
+SET ANSI_WARNINGS ON;
+SET CONCAT_NULL_YIELDS_NULL ON;
+SET ARITHABORT ON;
+SET NUMERIC_ROUNDABORT OFF;
+
+-- Cấu hình tài khoản. Nếu đã có FirebaseUid thì ưu tiên dùng UID.
+-- Đặt cả hai thành NULL nếu chỉ muốn bổ sung cho các tài khoản demo có sẵn.
+DECLARE @TenHoSo nvarchar(120) = NULL;
+DECLARE @FirebaseUid nvarchar(128) = NULL;
+
+DECLARE @Now datetime2(3) = SYSUTCDATETIME();
+DECLARE @Today date = CONVERT(date, DATEADD(HOUR, 7, @Now));
+DECLARE @HomeKey uniqueidentifier = '10550200-0000-4000-8000-000000000001';
+DECLARE @Compass nvarchar(450) = N'/images/theme/la-ban.svg';
+DECLARE @TripName nvarchar(160) = N'[DEMO] Hai ngày từ My Home đến Hội An';
+
+BEGIN TRY
+    BEGIN TRANSACTION;
+
+    DECLARE @LockResult int;
+    EXEC @LockResult = sys.sp_getapplock
+        @Resource = 'DauChanDiSan:SeedMyHomeHoiAn',
+        @LockMode = 'Exclusive',
+        @LockOwner = 'Transaction',
+        @LockTimeout = 10000;
+
+    IF @LockResult < 0
+        THROW 52000, N'Không lấy được khóa để chạy script demo. Hãy thử lại.', 1;
+
+    ----------------------------------------------------------------------
+    -- 1. Tìm tài khoản nhận dữ liệu
+    ----------------------------------------------------------------------
+    DECLARE @ProfileId int;
+
+    IF @FirebaseUid IS NOT NULL
+    BEGIN
+        SELECT @ProfileId = NguoiDungId
+        FROM dbo.NguoiDung
+        WHERE FirebaseUid = @FirebaseUid AND HoatDong = 1;
+
+        IF @ProfileId IS NULL
+            THROW 52001, N'UID chưa có hồ sơ hoạt động. Hãy đăng nhập website rồi kiểm tra lại UID.', 1;
+    END
+    ELSE IF @TenHoSo IS NOT NULL
+    BEGIN
+        DECLARE @MatchCount int;
+
+        SELECT @MatchCount = COUNT(*), @ProfileId = MIN(NguoiDungId)
+        FROM dbo.NguoiDung
+        WHERE HoTen = @TenHoSo AND HoatDong = 1;
+
+        IF @MatchCount = 0
+            THROW 52002, N'Không tìm thấy hồ sơ theo @TenHoSo. Hãy kiểm tra tên hiển thị hoặc điền FirebaseUid.', 1;
+
+        IF @MatchCount > 1
+            THROW 52003, N'Có nhiều hồ sơ trùng tên. Hãy điền FirebaseUid của đúng tài khoản.', 1;
+    END;
+
+    DECLARE @Targets TABLE (NguoiDungId int PRIMARY KEY);
+
+    INSERT @Targets(NguoiDungId)
+    SELECT NguoiDungId
+    FROM dbo.NguoiDung
+    WHERE HoatDong = 1 AND (
+        NguoiDungId = @ProfileId
+        OR FirebaseUid IN (
+            N'demo-lan', N'demo-khoi', N'demo-admin',
+            N'demo-doi-tac', N'demo-van-hoa'
+        )
+    );
+
+    DECLARE @Admin int = (
+        SELECT NguoiDungId FROM dbo.NguoiDung
+        WHERE FirebaseUid = N'demo-admin' AND HoatDong = 1
+    );
+    DECLARE @Moderator int = (
+        SELECT NguoiDungId FROM dbo.NguoiDung
+        WHERE FirebaseUid = N'demo-van-hoa' AND HoatDong = 1
+    );
+    DECLARE @PartnerUser int = (
+        SELECT NguoiDungId FROM dbo.NguoiDung
+        WHERE FirebaseUid = N'demo-doi-tac' AND HoatDong = 1
+    );
+    DECLARE @DaNang int = (
+        SELECT TinhThanhId FROM dbo.TinhThanh WHERE Ma = 'DA_NANG' AND HoatDong = 1
+    );
+    DECLARE @Loai int = (
+        SELECT LoaiDiSanId FROM dbo.LoaiDiSan WHERE Ma = 'KHU_DI_TICH'
+    );
+    DECLARE @HoiAn int = (
+        SELECT DiSanId FROM dbo.vw_DiSanCongKhai WHERE Slug = 'pho-co-hoi-an'
+    );
+    DECLARE @ThanhHa int = (
+        SELECT DiSanId FROM dbo.vw_DiSanCongKhai WHERE Slug = 'lang-gom-thanh-ha'
+    );
+    DECLARE @MySon int = (
+        SELECT DiSanId FROM dbo.vw_DiSanCongKhai WHERE Slug = 'thanh-dia-my-son'
+    );
+
+    IF @Admin IS NULL OR @Moderator IS NULL OR @PartnerUser IS NULL
+       OR @DaNang IS NULL OR @Loai IS NULL
+       OR @HoiAn IS NULL OR @ThanhHa IS NULL OR @MySon IS NULL
+        THROW 52004, N'Thiếu tài khoản demo hoặc địa điểm gốc trong CSDL.', 1;
+
+    ----------------------------------------------------------------------
+    -- 2. My Home, tư liệu, huy hiệu và bài kiểm tra
+    ----------------------------------------------------------------------
+    IF NOT EXISTS (SELECT 1 FROM dbo.DiSan WHERE Slug = 'my-home-demo-thanh-khe')
+        INSERT dbo.DiSan
+            (TinhThanhId, LoaiDiSanId, Slug, Ten, TomTat, NoiDung,
+             DiaChi, ViDo, KinhDo, BanKinhCheckInM, SaiSoGpsToiDaM,
+             ThoiLuongPhut, AnhBiaPath, TrangThai)
+        VALUES
+            (@DaNang, @Loai, 'my-home-demo-thanh-khe', N'My Home [DEMO]',
+             N'Điểm xuất phát giả lập tại Thanh Khê.',
+             N'**My Home** là điểm xuất phát mẫu của chuyến Hội An và Mỹ Sơn.',
+             N'Thanh Khê, Đà Nẵng · Điểm giả lập',
+             16.068904, 108.197188, 150, 60, 15, @Compass, 'CONG_KHAI');
+
+    DECLARE @Home int = (
+        SELECT DiSanId FROM dbo.vw_DiSanCongKhai
+        WHERE Slug = 'my-home-demo-thanh-khe'
+          AND ViDo = 16.068904 AND KinhDo = 108.197188
+    );
+
+    IF @Home IS NULL
+        THROW 52005, N'My Home đang bị ẩn hoặc đã được đổi tọa độ.', 1;
+
+    IF NOT EXISTS (SELECT 1 FROM dbo.MediaDiSan WHERE DiSanId = @Home AND ThuTu = 1)
+        INSERT dbo.MediaDiSan(DiSanId, AnhPath, ChuThich, ThuTu)
+        VALUES (@Home, @Compass, N'Ảnh minh họa điểm xuất phát', 1);
+
+    IF NOT EXISTS (SELECT 1 FROM dbo.GioThamQuan WHERE DiSanId = @Home)
+        INSERT dbo.GioThamQuan(DiSanId, ThuTrongTuan, GioMo, GioDong)
+        SELECT @Home, v.Thu, '07:00', '20:00'
+        FROM (VALUES (1),(2),(3),(4),(5),(6),(7)) v(Thu);
+
+    IF NOT EXISTS (
+        SELECT 1 FROM dbo.TuLieuDiSan
+        WHERE DiSanId = @HoiAn AND TieuDe = N'[DEMO] Gợi ý quan sát phố cổ'
+    )
+        INSERT dbo.TuLieuDiSan
+            (DiSanId, TieuDe, TrichYeu, Nguon, NguoiDuyetId, DuyetLucUtc, CongKhai)
+        VALUES
+            (@HoiAn, N'[DEMO] Gợi ý quan sát phố cổ',
+             N'Ghi chép mẫu về mái ngói, mặt tiền nhà phố và đoạn đi bộ quanh Chùa Cầu.',
+             N'Dữ liệu minh họa', @Moderator, @Now, 1);
+
+    DECLARE @Material int = (
+        SELECT MIN(TuLieuId) FROM dbo.TuLieuDiSan
+        WHERE DiSanId = @HoiAn AND TieuDe = N'[DEMO] Gợi ý quan sát phố cổ'
+    );
+
+    IF NOT EXISTS (SELECT 1 FROM dbo.HuyHieu WHERE Ma = 'DEMO_HOI_AN')
+        INSERT dbo.HuyHieu(Ma, Ten, MoTa, AnhPath)
+        VALUES ('DEMO_HOI_AN', N'Dấu chân Hội An [DEMO]',
+                N'Huy hiệu minh họa cho bài kiểm tra mẫu.', @Compass);
+
+    DECLARE @Badge int = (
+        SELECT HuyHieuId FROM dbo.HuyHieu WHERE Ma = 'DEMO_HOI_AN'
+    );
+    DECLARE @Quiz int = (
+        SELECT NhiemVuId FROM dbo.BaiKiemTraDiSan WHERE DiSanId = @Home
+    );
+
+    IF @Quiz IS NULL
+    BEGIN
+        INSERT dbo.NhiemVu(HuyHieuId, DiSanId, Loai, Ten, MoTa, BatDauUtc, CongKhai)
+        VALUES (@Badge, @Home, 'QUIZ', N'[DEMO] Điểm xuất phát',
+                N'Bài kiểm tra mẫu cho chuyến Hội An.', DATEADD(DAY, -30, @Now), 1);
+        SET @Quiz = CONVERT(int, SCOPE_IDENTITY());
+
+        INSERT dbo.BaiKiemTraDiSan(DiSanId, NhiemVuId) VALUES (@Home, @Quiz);
+
+        INSERT dbo.CauHoiNhiemVu(NhiemVuId, ThuTu, NoiDung, GiaiThich)
+        VALUES (@Quiz, 1, N'Điểm xuất phát mẫu đặt ở đâu?', N'Thanh Khê, Đà Nẵng.');
+
+        DECLARE @QuestionNew int = CONVERT(int, SCOPE_IDENTITY());
+
+        INSERT dbo.LuaChonCauHoi(CauHoiId, ThuTu, NoiDung, Dung)
+        VALUES (@QuestionNew, 1, N'Thanh Khê, Đà Nẵng', 1),
+               (@QuestionNew, 2, N'Hà Nội', 0),
+               (@QuestionNew, 3, N'Huế', 0);
+    END;
+
+    DECLARE @Question int, @Answer int;
+
+    SELECT TOP (1) @Question = q.CauHoiId, @Answer = a.LuaChonId
+    FROM dbo.CauHoiNhiemVu q
+    JOIN dbo.LuaChonCauHoi a ON a.CauHoiId = q.CauHoiId AND a.Dung = 1
+    WHERE q.NhiemVuId = @Quiz
+    ORDER BY q.ThuTu;
+
+    ----------------------------------------------------------------------
+    -- 3. Đối tác, trải nghiệm công khai và trải nghiệm chờ duyệt
+    ----------------------------------------------------------------------
+    DECLARE @OrgName nvarchar(160) = N'Xưởng Gốm Dấu Chân [DEMO]';
+
+    IF NOT EXISTS (SELECT 1 FROM dbo.DoiTac WHERE TinhThanhId = @DaNang AND Ten = @OrgName)
+        INSERT dbo.DoiTac(TinhThanhId, Ten, MoTa, Email, DiaChi)
+        VALUES (@DaNang, @OrgName, N'Đơn vị giả lập để thử lịch trải nghiệm.',
+                N'xuong-gom@example.test', N'Làng gốm Thanh Hà · Dữ liệu demo');
+
+    DECLARE @Org int = (
+        SELECT DoiTacId FROM dbo.DoiTac WHERE TinhThanhId = @DaNang AND Ten = @OrgName
+    );
+
+    IF NOT EXISTS (
+        SELECT 1 FROM dbo.ThanhVienDoiTac
+        WHERE DoiTacId = @Org AND NguoiDungId = @PartnerUser
+    )
+        INSERT dbo.ThanhVienDoiTac(DoiTacId, NguoiDungId, Quyen)
+        VALUES (@Org, @PartnerUser, 'QUAN_LY');
+
+    IF NOT EXISTS (SELECT 1 FROM dbo.TraiNghiem WHERE Slug = 'demo-hoi-an-nan-gom')
+        INSERT dbo.TraiNghiem
+            (DoiTacId, DiSanId, Slug, Ten, MoTa, DiaDiemTapTrung, ThoiLuongPhut,
+             GiaMoiNguoi, AnhBiaPath, TrangThai, NguoiDuyetId, DuyetLucUtc)
+        VALUES
+            (@Org, @ThanhHa, 'demo-hoi-an-nan-gom', N'[DEMO] Nặn gốm Thanh Hà',
+             N'Thử tạo hình một chiếc chén nhỏ.', N'Làng gốm Thanh Hà', 75, 60000,
+             N'/images/di-san/thanh-ha.webp', 'CONG_KHAI', @Admin, @Now);
+
+    IF NOT EXISTS (SELECT 1 FROM dbo.TraiNghiem WHERE Slug = 'demo-hoi-an-cho-duyet')
+        INSERT dbo.TraiNghiem
+            (DoiTacId, DiSanId, Slug, Ten, MoTa, ThoiLuongPhut, TrangThai)
+        VALUES
+            (@Org, @HoiAn, 'demo-hoi-an-cho-duyet', N'[DEMO] Dạo phố và ký họa',
+             N'Trải nghiệm mẫu đang chờ duyệt.', 60, 'CHO_DUYET');
+
+    DECLARE @Experience int = (
+        SELECT TraiNghiemId FROM dbo.TraiNghiem WHERE Slug = 'demo-hoi-an-nan-gom'
+    );
+
+    IF NOT EXISTS (
+        SELECT 1 FROM dbo.MediaTraiNghiem WHERE TraiNghiemId = @Experience AND ThuTu = 1
+    )
+        INSERT dbo.MediaTraiNghiem(TraiNghiemId, AnhPath, ChuThich, ThuTu)
+        VALUES (@Experience, N'/images/di-san/thanh-ha.webp', N'Ảnh minh họa làng gốm', 1);
+
+    DECLARE @PastSlot int, @FutureSlot int;
+    DECLARE @PastStart datetime2(3), @PastEnd datetime2(3);
+
+    SELECT TOP (1) @PastSlot = LichTraiNghiemId,
+        @PastStart = BatDauUtc, @PastEnd = KetThucUtc
+    FROM dbo.LichTraiNghiem
+    WHERE TraiNghiemId = @Experience AND TrangThai = 'DONG' AND KetThucUtc < @Now
+    ORDER BY BatDauUtc DESC;
+
+    IF @PastSlot IS NULL
+    BEGIN
+        SET @PastStart = DATEADD(DAY, -4, @Now);
+        SET @PastEnd = DATEADD(MINUTE, 75, @PastStart);
+
+        INSERT dbo.LichTraiNghiem(TraiNghiemId, BatDauUtc, KetThucUtc, SucChua, TrangThai)
+        VALUES (@Experience, @PastStart, @PastEnd, 100, 'DONG');
+
+        SET @PastSlot = CONVERT(int, SCOPE_IDENTITY());
+    END;
+
+    SELECT TOP (1) @FutureSlot = LichTraiNghiemId
+    FROM dbo.LichTraiNghiem
+    WHERE TraiNghiemId = @Experience AND TrangThai = 'MO'
+      AND BatDauUtc > DATEADD(MINUTE, 30, @Now) AND SucChua >= 2
+    ORDER BY BatDauUtc;
+
+    IF @FutureSlot IS NULL
+    BEGIN
+        DECLARE @FutureStart datetime2(3) = DATEADD(DAY, 7, @Now);
+
+        INSERT dbo.LichTraiNghiem(TraiNghiemId, BatDauUtc, KetThucUtc, SucChua, TrangThai)
+        VALUES (@Experience, @FutureStart, DATEADD(MINUTE, 75, @FutureStart), 100, 'MO');
+
+        SET @FutureSlot = CONVERT(int, SCOPE_IDENTITY());
+    END;
+
+    ----------------------------------------------------------------------
+    -- 4. Dữ liệu của chuyến đi
+    ----------------------------------------------------------------------
+    DECLARE @Stops TABLE (
+        DiSanId int PRIMARY KEY,
+        Ngay int NOT NULL,
+        ThuTu int NOT NULL,
+        Anh nvarchar(450) NOT NULL,
+        TieuDe nvarchar(160) NOT NULL,
+        GhiChu nvarchar(500) NOT NULL,
+        NoiDung nvarchar(1000) NOT NULL
+    );
+
+    INSERT @Stops VALUES
+    (@Home, 1, 1, @Compass,
+     N'[DEMO] Xuất phát từ My Home',
+     N'Ghi dấu xuất phát ở Thanh Khê.',
+     N'Chuẩn bị nước và máy ảnh, xem lại bản đồ rồi lên đường tới Hội An.'),
+    (@HoiAn, 1, 2, N'/images/di-san/hoi-an.webp',
+     N'[DEMO] Buổi sáng ở phố cổ',
+     N'Đi bộ quanh Chùa Cầu và ngắm các dãy nhà phố.',
+     N'Mình dừng lại quan sát mái ngói, mặt tiền nhà phố và ghi lại một góc đường yên tĩnh.'),
+    (@ThanhHa, 1, 3, N'/images/di-san/thanh-ha.webp',
+     N'[DEMO] Một chiếc chén ở Thanh Hà',
+     N'Thử nặn gốm và xem cách tạo hình trên bàn xoay.',
+     N'Chiếc chén đầu tiên hơi lệch. Mình ghi lại từng bước để lần sau thử làm lại.'),
+    (@MySon, 2, 1, N'/images/di-san/my-son.webp',
+     N'[DEMO] Ngày thứ hai ở Mỹ Sơn',
+     N'Quan sát thân tháp, cửa và các lớp gạch.',
+     N'Mình quan sát các cụm tháp và ghi lại những chi tiết khác nhau ở chân tháp.');
+
+    DECLARE @Plan nvarchar(max) = (
+        SELECT Ngay AS ngay, ThuTu AS thuTu, DiSanId AS diSanId, GhiChu AS ghiChu
+        FROM @Stops
+        ORDER BY Ngay, ThuTu
+        FOR JSON PATH, ROOT('diem')
+    );
+    DECLARE @Sources nvarchar(max) = (
+        SELECT 'DI_SAN' AS loai, DiSanId AS id
+        FROM @Stops
+        ORDER BY Ngay, ThuTu
+        FOR JSON PATH
+    );
+
+    DECLARE @CheckIns TABLE (DiSanId int PRIMARY KEY, CheckInId bigint NOT NULL);
+    DECLARE @UserId int, @Chat bigint, @Reply bigint, @Trip bigint, @Booking bigint;
+    DECLARE @Day1 date, @Day2 date;
+
+    -- Dùng cùng mã đánh dấu với bộ dữ liệu trước để tránh tạo trùng.
+    DECLARE DemoUsers CURSOR LOCAL FAST_FORWARD FOR
+        SELECT t.NguoiDungId FROM @Targets t
+        WHERE NOT EXISTS (
+            SELECT 1 FROM dbo.CheckInDiSan c
+            WHERE c.NguoiDungId = t.NguoiDungId AND c.MaYeuCau = @HomeKey
+        )
+        ORDER BY t.NguoiDungId;
+
+    OPEN DemoUsers;
+    FETCH NEXT FROM DemoUsers INTO @UserId;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        SET @Day1 = DATEADD(DAY, -3, @Today);
+
+        WHILE EXISTS (
+            SELECT 1
+            FROM dbo.CheckInDiSan c JOIN @Stops s ON s.DiSanId = c.DiSanId
+            WHERE c.NguoiDungId = @UserId
+              AND c.NgayDiaPhuong = DATEADD(DAY, s.Ngay - 1, @Day1)
+        )
+            SET @Day1 = DATEADD(DAY, -1, @Day1);
+
+        SET @Day2 = DATEADD(DAY, 1, @Day1);
+        DELETE FROM @CheckIns;
+
+        -- Hội thoại và đề xuất hành trình mẫu.
+        INSERT dbo.HoiThoaiAI(NguoiDungId, TieuDe)
+        VALUES (@UserId, N'[DEMO] Lên lịch hai ngày ở Hội An');
+        SET @Chat = CONVERT(bigint, SCOPE_IDENTITY());
+
+        EXEC dbo.usp_LuuTinNhanGemini @UserId, @Chat, 'USER',
+            N'Lên lịch từ My Home để ghé phố cổ, Thanh Hà và Mỹ Sơn.',
+            @TraKetQua = 0;
+
+        EXEC dbo.usp_LuuTinNhanGemini @UserId, @Chat, 'ASSISTANT',
+            N'[DEMO] Ngày 1 ghé phố cổ và Thanh Hà. Ngày 2 dành cho Mỹ Sơn.',
+            @MaMoHinh = 'gemini-demo',
+            @DeXuatHanhTrinhJson = @Plan,
+            @NguonJson = @Sources,
+            @TinNhanAIId = @Reply OUTPUT,
+            @TraKetQua = 0;
+
+        EXEC dbo.usp_TaoHanhTrinh @UserId, @TripName, @Day1, @Day2,
+            @MoTa = N'Chuyến đi giả lập để thử bản đồ, check-in và sổ tay.',
+            @TinNhanAIId = @Reply,
+            @HanhTrinhId = @Trip OUTPUT,
+            @TraKetQua = 0;
+
+        UPDATE dbo.HanhTrinh
+        SET TrangThai = 'HOAN_THANH', AnhBiaPath = N'/images/di-san/hoi-an.webp'
+        WHERE HanhTrinhId = @Trip;
+
+        -- Tạo check-in trong quá khứ. Tọa độ và bán kính lấy từ di sản hiện hành.
+        INSERT dbo.CheckInDiSan
+            (NguoiDungId, DiSanId, MaYeuCau, ThoiGianUtc, ViDo, KinhDo,
+             SaiSoGpsM, TamViDo, TamKinhDo, BanKinhApDungM,
+             SaiSoToiDaApDungM, KhoangCachM, GhiChu, AnhPath)
+        OUTPUT inserted.DiSanId, inserted.CheckInId INTO @CheckIns
+        SELECT @UserId, d.DiSanId,
+               CASE WHEN d.DiSanId = @Home THEN @HomeKey ELSE NEWID() END,
+               DATEADD(HOUR, 1 + s.ThuTu,
+                   CONVERT(datetime2(3), DATEADD(DAY, s.Ngay - 1, @Day1))),
+               d.ViDo, d.KinhDo, 5, d.ViDo, d.KinhDo,
+               d.BanKinhCheckInM, d.SaiSoGpsToiDaM,
+               dbo.fn_KhoangCachM(d.ViDo, d.KinhDo, d.ViDo, d.KinhDo),
+               N'[DEMO] ' + s.GhiChu, s.Anh
+        FROM @Stops s
+        JOIN dbo.vw_DiSanCongKhai d ON d.DiSanId = s.DiSanId;
+
+        INSERT dbo.HanhTrinhCheckIn(HanhTrinhId, CheckInId, NguoiDungId)
+        SELECT @Trip, CheckInId, @UserId FROM @CheckIns;
+
+        INSERT dbo.NhatKyHanhTrinh
+            (HanhTrinhId, CheckInId, TieuDe, NoiDung, NgayGhi, AnhBiaPath)
+        SELECT @Trip, c.CheckInId, s.TieuDe, s.NoiDung,
+               DATEADD(DAY, s.Ngay - 1, @Day1), s.Anh
+        FROM @Stops s JOIN @CheckIns c ON c.DiSanId = s.DiSanId;
+
+        INSERT dbo.MediaNhatKy(NhatKyId, AnhPath, ChuThich, ThuTu)
+        SELECT NhatKyId, AnhBiaPath, N'Ảnh minh họa cho ghi chép mẫu', 1
+        FROM dbo.NhatKyHanhTrinh WHERE HanhTrinhId = @Trip;
+
+        -- Địa điểm đã lưu và sở thích cho tính năng gợi ý.
+        INSERT dbo.DiSanYeuThich(NguoiDungId, DiSanId)
+        SELECT @UserId, s.DiSanId FROM @Stops s
+        WHERE s.DiSanId <> @Home AND NOT EXISTS (
+            SELECT 1 FROM dbo.DiSanYeuThich f
+            WHERE f.NguoiDungId = @UserId AND f.DiSanId = s.DiSanId
+        );
+
+        INSERT dbo.SoThichNguoiDung(NguoiDungId, ChuDeId, MucDo)
+        SELECT @UserId, c.ChuDeId, 4 FROM dbo.ChuDe c
+        WHERE c.Ma IN ('KIEN_TRUC', 'GOM') AND NOT EXISTS (
+            SELECT 1 FROM dbo.SoThichNguoiDung f
+            WHERE f.NguoiDungId = @UserId AND f.ChuDeId = c.ChuDeId
+        );
+
+        IF EXISTS (
+            SELECT 1 FROM dbo.NguoiDung
+            WHERE NguoiDungId = @UserId AND ChoPhepCaNhanHoa = 1
+        )
+            INSERT dbo.SuKienTuongTac(MaSuKien, NguoiDungId, Loai, DiSanId)
+            SELECT NEWID(), @UserId, 'XEM', DiSanId
+            FROM @Stops WHERE DiSanId <> @Home;
+
+        INSERT dbo.DanhGiaDiSan
+            (NguoiDungId, DiSanId, CheckInId, SoSao, NoiDung, CongKhai)
+        SELECT @UserId, c.DiSanId, c.CheckInId,
+               CASE WHEN c.DiSanId = @MySon THEN 4 ELSE 5 END,
+               N'[DEMO] ' + s.GhiChu,
+               CASE WHEN c.DiSanId = @MySon THEN 0 ELSE 1 END
+        FROM @CheckIns c JOIN @Stops s ON s.DiSanId = c.DiSanId
+        WHERE c.DiSanId <> @Home AND NOT EXISTS (
+            SELECT 1 FROM dbo.DanhGiaDiSan r
+            WHERE r.NguoiDungId = @UserId AND r.DiSanId = c.DiSanId
+        );
+
+        -- Hai đóng góp để hiện trong hồ sơ và hàng đợi kiểm duyệt.
+        INSERT dbo.DongGopDiSan
+            (NguoiDungId, MaYeuCau, Loai, DiSanId, TieuDe, NoiDung,
+             AnhPath, TrangThai, NguoiDuyetId, DuyetLucUtc,
+             DiSanCongKhaiId, TuLieuId, TaoLucUtc, CapNhatLucUtc)
+        VALUES
+            (@UserId, NEWID(), 'BO_SUNG', @ThanhHa,
+             N'[DEMO] Bổ sung ghi chép về bàn xoay ở Thanh Hà',
+             N'Đề xuất thêm ghi chép quan sát thao tác tạo hình và ảnh minh họa.',
+             N'/images/di-san/thanh-ha.webp', 'CHO_DUYET',
+             NULL, NULL, NULL, NULL, @Now, @Now),
+            (@UserId, NEWID(), 'BO_SUNG', @HoiAn,
+             N'[DEMO] Bổ sung ghi chép về nhà phố Hội An',
+             N'Gửi ghi chép mẫu về mái ngói và mặt tiền nhà phố.',
+             N'/images/di-san/hoi-an.webp', 'DA_DUYET',
+             @Moderator, @Now, @HoiAn, @Material, @Now, @Now);
+
+        IF @Question IS NOT NULL AND @Answer IS NOT NULL
+           AND NOT EXISTS (
+               SELECT 1 FROM dbo.KetQuaTraLoi
+               WHERE NguoiDungId = @UserId AND CauHoiId = @Question AND DungKhiNop = 1
+           )
+            EXEC dbo.usp_NopCauTraLoi @UserId, @Question, @Answer, @TraKetQua = 0;
+
+        IF NOT EXISTS (
+            SELECT 1 FROM dbo.DiemDiSan WHERE NguoiDungId = @UserId AND DiSanId = @Home
+        )
+            INSERT dbo.DiemDiSan(NguoiDungId, DiSanId, Diem)
+            VALUES (@UserId, @Home, 30);
+
+        -- Một lượt đã tham gia để có đánh giá trải nghiệm.
+        SET @Booking = NULL;
+
+        SELECT TOP (1) @Booking = YeuCauId
+        FROM dbo.YeuCauThamGia
+        WHERE NguoiDungId = @UserId AND LichTraiNghiemId = @PastSlot
+          AND TrangThai = 'DA_THAM_GIA'
+        ORDER BY YeuCauId DESC;
+
+        IF @Booking IS NULL AND NOT EXISTS (
+            SELECT 1 FROM dbo.YeuCauThamGia
+            WHERE NguoiDungId = @UserId AND LichTraiNghiemId = @PastSlot
+              AND TrangThai IN ('CHO_XAC_NHAN', 'DA_XAC_NHAN')
+        )
+        BEGIN
+            INSERT dbo.YeuCauThamGia
+                (LichTraiNghiemId, TraiNghiemId, NguoiDungId, SoNguoi, DonGiaDuKien,
+                 GhiChu, TrangThai, TaoLucUtc, XuLyLucUtc, NguoiXuLyId)
+            VALUES
+                (@PastSlot, @Experience, @UserId, 1, 60000, N'[DEMO] Đã tham gia nặn gốm.',
+                 'DA_THAM_GIA', DATEADD(DAY, -2, @PastStart), @PastEnd, @PartnerUser);
+
+            SET @Booking = CONVERT(bigint, SCOPE_IDENTITY());
+        END;
+
+        IF @Booking IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM dbo.DanhGiaTraiNghiem
+            WHERE NguoiDungId = @UserId AND TraiNghiemId = @Experience
+        )
+            INSERT dbo.DanhGiaTraiNghiem(NguoiDungId, TraiNghiemId, YeuCauId, SoSao, NoiDung)
+            VALUES (@UserId, @Experience, @Booking, 5,
+                    N'[DEMO] Phần hướng dẫn nặn gốm dễ theo dõi.');
+
+        -- Một yêu cầu chờ xác nhận để đối tác có dữ liệu xử lý.
+        IF @UserId <> @PartnerUser AND NOT EXISTS (
+            SELECT 1 FROM dbo.YeuCauThamGia
+            WHERE NguoiDungId = @UserId AND LichTraiNghiemId = @FutureSlot
+              AND TrangThai IN ('CHO_XAC_NHAN', 'DA_XAC_NHAN', 'DA_THAM_GIA')
+        )
+            INSERT dbo.YeuCauThamGia
+                (LichTraiNghiemId, TraiNghiemId, NguoiDungId, SoNguoi, DonGiaDuKien, GhiChu)
+            VALUES (@FutureSlot, @Experience, @UserId, 2, 60000,
+                    N'[DEMO] Xin giữ chỗ cho hai người.');
+
+        -- Đơn đối tác cho hàng đợi của quản trị viên.
+        IF NOT EXISTS (
+            SELECT 1 FROM dbo.NguoiDungVaiTro
+            WHERE NguoiDungId = @UserId AND MaVaiTro = 'DOI_TAC'
+        ) AND NOT EXISTS (
+            SELECT 1 FROM dbo.DonDangKyDoiTac
+            WHERE NguoiDungId = @UserId AND TrangThai = 'CHO_DUYET'
+        )
+            INSERT dbo.DonDangKyDoiTac
+                (NguoiDungId, TinhThanhId, Ten, Email, DienThoai, DiaChi, MoTa)
+            VALUES
+                (@UserId, @DaNang, CONCAT(N'[DEMO] Nhóm trải nghiệm ', @UserId),
+                 N'doi-tac@example.test', '0000000000',
+                 N'Đà Nẵng · Địa chỉ giả lập',
+                 N'Đơn đăng ký mẫu để thử màn hình quản trị.');
+
+        FETCH NEXT FROM DemoUsers INTO @UserId;
+    END;
+
+    CLOSE DemoUsers;
+    DEALLOCATE DemoUsers;
+
+    COMMIT TRANSACTION;
+
+    ----------------------------------------------------------------------
+    -- 5. Kết quả để so sánh với các ô trên trang Hồ sơ
+    ----------------------------------------------------------------------
+    SELECT
+        u.NguoiDungId, u.HoTen,
+        COALESCE(r.Diem, 0) AS Diem,
+        r.Hang,
+        (SELECT COUNT(DISTINCT c.DiSanId)
+         FROM dbo.CheckInDiSan c
+         WHERE c.NguoiDungId = u.NguoiDungId) AS DiSanDaDen,
+        (SELECT COUNT(*)
+         FROM dbo.NhatKyHanhTrinh n
+         JOIN dbo.HanhTrinh h ON h.HanhTrinhId = n.HanhTrinhId
+         WHERE h.NguoiDungId = u.NguoiDungId) AS KhoanhKhac,
+        (SELECT COUNT(*)
+         FROM dbo.DongGopDiSan d
+         WHERE d.NguoiDungId = u.NguoiDungId) AS DongGop
+    FROM @Targets t
+    JOIN dbo.NguoiDung u ON u.NguoiDungId = t.NguoiDungId
+    LEFT JOIN dbo.vw_XepHangDiSan r ON r.NguoiDungId = u.NguoiDungId
+    ORDER BY CASE WHEN u.NguoiDungId = @ProfileId THEN 0 ELSE 1 END, u.NguoiDungId;
+END TRY
+BEGIN CATCH
+    IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
+    THROW;
+END CATCH;
+
+GO
+
+-- ================================================================
+-- 4. Ảnh, bảng giá phòng và menu cho trang mới
+-- ================================================================
+-- Dấu Chân Di Sản | Danh bạ lưu trú và ăn uống
+-- Chạy trên CSDL đã có danh mục dịch vụ du lịch.
+
+USE [DauChanDiSan];
+GO
+SET XACT_ABORT ON;
+SET NOCOUNT ON;
+
+IF OBJECT_ID(N'dbo.DichVuDuLich', N'U') IS NULL
+   OR OBJECT_ID(N'dbo.GiaDichVuDuLich', N'U') IS NULL
+   OR COL_LENGTH(N'dbo.DichVuDuLich', N'KhuVuc') IS NULL
+BEGIN
+    THROW 51310, N'Hãy chạy bản SQL bổ sung dịch vụ du lịch trước khi cài danh bạ.', 1;
+END;
+
+BEGIN TRY
+    BEGIN TRAN;
+
+    IF OBJECT_ID(N'dbo.DichVuHinhAnh', N'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.DichVuHinhAnh (
+            AnhId int IDENTITY PRIMARY KEY,
+            DichVuId int NOT NULL REFERENCES dbo.DichVuDuLich(DichVuId),
+            AnhPath nvarchar(400) NOT NULL,
+            ChuThich nvarchar(200) NULL,
+            ThuTu smallint NOT NULL,
+            HoatDong bit NOT NULL DEFAULT 1,
+            UNIQUE (DichVuId, ThuTu),
+            CHECK (ThuTu > 0),
+            CHECK (AnhPath LIKE N'/images/dich-vu/%' AND CHARINDEX(N'..', AnhPath) = 0)
+        );
+    END;
+
+    IF OBJECT_ID(N'dbo.DichVuBangGiaMuc', N'U') IS NULL
+    BEGIN
+        CREATE TABLE dbo.DichVuBangGiaMuc (
+            MucId int IDENTITY PRIMARY KEY,
+            DichVuId int NOT NULL REFERENCES dbo.DichVuDuLich(DichVuId),
+            MaMuc varchar(40) NOT NULL,
+            LoaiMuc varchar(8) NOT NULL,
+            Nhom nvarchar(80) NULL,
+            Ten nvarchar(160) NOT NULL,
+            MoTa nvarchar(500) NULL,
+            GiaVnd decimal(14,0) NULL,
+            SucChua smallint NULL,
+            AnhPath nvarchar(400) NULL,
+            ThuTu smallint NOT NULL DEFAULT 1,
+            HoatDong bit NOT NULL DEFAULT 1,
+            UNIQUE (DichVuId, MaMuc),
+            CHECK (LoaiMuc IN ('PHONG', 'MON')),
+            CHECK (ThuTu > 0),
+            CHECK (GiaVnd IS NULL OR GiaVnd >= 0),
+            CHECK ((LoaiMuc = 'MON' AND SucChua IS NULL)
+                OR (LoaiMuc = 'PHONG' AND (SucChua IS NULL OR SucChua BETWEEN 1 AND 30))),
+            CHECK (AnhPath IS NULL OR (AnhPath LIKE N'/images/dich-vu/%' AND CHARINDEX(N'..', AnhPath) = 0))
+        );
+    END;
+
+    COMMIT;
+END TRY
+BEGIN CATCH
+    IF XACT_STATE() <> 0 ROLLBACK;
+    THROW;
+END CATCH;
+
+GO
+
+-- Đổi @ThemMau thành 0 nếu chỉ cần tạo cấu trúc bảng.
+DECLARE @ThemMau bit = 1;
+IF @ThemMau = 0 RETURN;
+
+IF OBJECT_ID(N'dbo.DichVuHinhAnh', N'U') IS NULL
+   OR OBJECT_ID(N'dbo.DichVuBangGiaMuc', N'U') IS NULL
+BEGIN
+    THROW 51311, N'Hãy chạy 01_DanhBaDichVu.sql trước.', 1;
+END;
+
+BEGIN TRY
+    BEGIN TRAN;
+
+    -- Gắn ảnh minh họa cho các dịch vụ DEMO đã có, ưu tiên vị trí ảnh đầu tiên.
+    INSERT dbo.DichVuHinhAnh (DichVuId, AnhPath, ChuThich, ThuTu)
+    SELECT d.DichVuId,
+           CASE WHEN d.Loai = 'QUAN_AN' THEN N'/images/dich-vu/an-uong-minh-hoa.svg'
+                ELSE N'/images/dich-vu/luu-tru-minh-hoa.svg' END,
+           N'Minh họa cho dữ liệu demo', 1
+    FROM dbo.DichVuDuLich d
+    WHERE d.LaDuLieuDemo = 1
+      AND d.Loai IN ('QUAN_AN', 'KHACH_SAN', 'HOMESTAY')
+      AND NOT EXISTS (
+          SELECT 1 FROM dbo.DichVuHinhAnh a WITH (UPDLOCK, HOLDLOCK)
+          WHERE a.DichVuId = d.DichVuId AND a.ThuTu = 1
+      );
+
+    INSERT dbo.DichVuBangGiaMuc
+        (DichVuId, MaMuc, LoaiMuc, Nhom, Ten, MoTa, GiaVnd, SucChua, AnhPath, ThuTu)
+    SELECT d.DichVuId, m.Ma, 'PHONG', N'Loại phòng', m.Ten, m.MoTa,
+           g.GiaVnd + m.PhuPhi, m.SucChua, NULL, m.ThuTu
+    FROM dbo.DichVuDuLich d
+    OUTER APPLY (
+        SELECT TOP (1) g.GiaVnd
+        FROM dbo.GiaDichVuDuLich g
+        WHERE g.DichVuId = d.DichVuId
+          AND g.NgayApDung <= CONVERT(date, DATEADD(MINUTE, 420, SYSUTCDATETIME()))
+        ORDER BY g.NgayApDung DESC
+    ) g
+    CROSS JOIN (VALUES
+        ('phong-tieu-chuan', N'Phòng tiêu chuẩn', N'Giá giả lập theo một phòng, một đêm.', 0, 2, 1),
+        ('phong-gia-dinh', N'Phòng gia đình', N'Giá giả lập theo một phòng, một đêm.', 180000, 4, 2)
+    ) m(Ma, Ten, MoTa, PhuPhi, SucChua, ThuTu)
+    WHERE d.LaDuLieuDemo = 1
+      AND d.Loai IN ('KHACH_SAN', 'HOMESTAY')
+      AND NOT EXISTS (
+          SELECT 1 FROM dbo.DichVuBangGiaMuc p WITH (UPDLOCK, HOLDLOCK)
+          WHERE p.DichVuId = d.DichVuId AND p.MaMuc = m.Ma
+      );
+
+    INSERT dbo.DichVuBangGiaMuc
+        (DichVuId, MaMuc, LoaiMuc, Nhom, Ten, MoTa, GiaVnd, SucChua, AnhPath, ThuTu)
+    SELECT d.DichVuId, m.Ma, 'MON', m.Nhom, m.Ten, m.MoTa, m.Gia, NULL, NULL, m.ThuTu
+    FROM dbo.DichVuDuLich d
+    CROSS JOIN (VALUES
+        ('com-phan', N'Món chính', N'Cơm phần', N'Một phần ăn. Giá minh họa.', 55000, 1),
+        ('bun-dia-phuong', N'Món chính', N'Bún địa phương', N'Một tô. Giá minh họa.', 45000, 2),
+        ('tra-nha-lam', N'Đồ uống', N'Trà nhà làm', N'Một ly. Giá minh họa.', 20000, 3)
+    ) m(Ma, Nhom, Ten, MoTa, Gia, ThuTu)
+    WHERE d.LaDuLieuDemo = 1
+      AND d.Loai = 'QUAN_AN'
+      AND NOT EXISTS (
+          SELECT 1 FROM dbo.DichVuBangGiaMuc p WITH (UPDLOCK, HOLDLOCK)
+          WHERE p.DichVuId = d.DichVuId AND p.MaMuc = m.Ma
+      );
+
+    COMMIT;
+END TRY
+BEGIN CATCH
+    IF XACT_STATE() <> 0 ROLLBACK;
+    THROW;
+END CATCH;
+
+SELECT d.DichVuId, d.Slug, d.Ten, d.Loai,
+       (SELECT COUNT(*) FROM dbo.DichVuHinhAnh a WHERE a.DichVuId = d.DichVuId AND a.HoatDong = 1) AS SoAnh,
+       (SELECT COUNT(*) FROM dbo.DichVuBangGiaMuc m WHERE m.DichVuId = d.DichVuId AND m.HoatDong = 1) AS SoMucGia
+FROM dbo.DichVuDuLich d
+WHERE d.LaDuLieuDemo = 1 AND d.TrangThai = 'CONG_KHAI'
+ORDER BY d.Ten;
+
+GO
+
+IF OBJECT_ID(N'dbo.DichVuHinhAnh', N'U') IS NOT NULL
+   AND OBJECT_ID(N'dbo.DichVuBangGiaMuc', N'U') IS NOT NULL
+BEGIN
+    SELECT N'Danh bạ Lưu trú & Ăn uống' AS ChucNang,
+           OBJECT_ID(N'dbo.DichVuHinhAnh', N'U') AS BangAnh,
+           OBJECT_ID(N'dbo.DichVuBangGiaMuc', N'U') AS BangGiaPhongVaMenu;
+END;
+GO
+SET NOEXEC OFF;
+
+GO
+
+SET NOCOUNT ON;
+SET XACT_ABORT ON;
+
+IF OBJECT_ID(N'dbo.DichVuDuLich', N'U') IS NULL
+   OR OBJECT_ID(N'dbo.DichVuHinhAnh', N'U') IS NULL
+   OR OBJECT_ID(N'dbo.DichVuBangGiaMuc', N'U') IS NULL
+BEGIN
+    THROW 51320, N'Hãy chạy DauChanDiSan.sql hợp nhất trước.', 1;
+END;
+
+DECLARE @DiaDiem TABLE (
+    DichVuId int PRIMARY KEY,
+    Slug varchar(160) NOT NULL,
+    Loai varchar(16) NOT NULL
+);
+
+INSERT @DiaDiem (DichVuId, Slug, Loai)
+SELECT DichVuId, Slug, Loai
+FROM dbo.DichVuDuLich
+WHERE LaDuLieuDemo = 1
+  AND (
+      Slug IN ('demo-hue-quan-an-01', 'demo-hue-quan-an-02')
+      OR EXISTS (
+          SELECT 1
+          FROM (VALUES
+              ('hue'),
+              ('da-nang'),
+              ('hoi-an'),
+              ('thanh-ha'),
+              ('my-son'),
+              ('bat-trang')
+          ) AS k(KhuVuc)
+          WHERE Slug = CONCAT('demo-', k.KhuVuc, '-khach-san-01')
+             OR Slug = CONCAT('demo-', k.KhuVuc, '-homestay-01')
+             OR Slug = CONCAT('demo-', k.KhuVuc, '-quan-an-01')
+      )
+  );
+
+IF NOT EXISTS (SELECT 1 FROM @DiaDiem)
+BEGIN
+    THROW 51321, N'Chưa tìm thấy địa điểm demo. Kiểm tra phần dữ liệu mẫu.', 1;
+END;
+
+BEGIN TRY
+    BEGIN TRAN;
+
+    -- Thay ảnh bìa SVG chung bằng ảnh JPG riêng của địa điểm.
+    UPDATE a
+    SET a.AnhPath = CONCAT(N'/images/dich-vu/', d.Slug, N'/anh-bia.jpg'),
+        a.ChuThich = N'Ảnh bìa',
+        a.HoatDong = 1
+    FROM dbo.DichVuHinhAnh AS a
+    JOIN @DiaDiem AS d ON d.DichVuId = a.DichVuId
+    WHERE a.ThuTu = 1
+      AND a.AnhPath IN (
+          N'/images/dich-vu/luu-tru-minh-hoa.svg',
+          N'/images/dich-vu/an-uong-minh-hoa.svg'
+      );
+
+    -- Thêm ảnh bìa và ảnh không gian ở những vị trí còn trống.
+    INSERT dbo.DichVuHinhAnh
+        (DichVuId, AnhPath, ChuThich, ThuTu, HoatDong)
+    SELECT d.DichVuId,
+           CONCAT(N'/images/dich-vu/', d.Slug, N'/', v.TenFile),
+           v.ChuThich,
+           v.ThuTu,
+           1
+    FROM @DiaDiem AS d
+    CROSS JOIN (VALUES
+        (1, N'anh-bia.jpg', N'Ảnh bìa'),
+        (2, N'khong-gian.jpg', N'Không gian')
+    ) AS v(ThuTu, TenFile, ChuThich)
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM dbo.DichVuHinhAnh AS a WITH (UPDLOCK, HOLDLOCK)
+        WHERE a.DichVuId = d.DichVuId
+          AND a.ThuTu = v.ThuTu
+    );
+
+    -- Gắn ảnh cho từng loại phòng hoặc món demo.
+    UPDATE m
+    SET m.AnhPath = CONCAT(N'/images/dich-vu/', d.Slug, N'/', m.MaMuc, N'.jpg')
+    FROM dbo.DichVuBangGiaMuc AS m
+    JOIN @DiaDiem AS d ON d.DichVuId = m.DichVuId
+    WHERE NULLIF(LTRIM(RTRIM(m.AnhPath)), N'') IS NULL
+      AND (
+          (d.Loai IN ('KHACH_SAN', 'HOMESTAY')
+           AND m.MaMuc IN ('phong-tieu-chuan', 'phong-gia-dinh'))
+          OR
+          (d.Loai = 'QUAN_AN'
+           AND m.MaMuc IN ('com-phan', 'bun-dia-phuong', 'tra-nha-lam'))
+      );
+
+    COMMIT;
+END TRY
+BEGIN CATCH
+    IF XACT_STATE() <> 0 ROLLBACK;
+    THROW;
+END CATCH;
+
+-- Kết quả để đối chiếu với thư mục ảnh.
+SELECT d.Slug, a.ChuThich, a.ThuTu, a.AnhPath
+FROM @DiaDiem AS d
+JOIN dbo.DichVuHinhAnh AS a ON a.DichVuId = d.DichVuId
+ORDER BY d.Slug, a.ThuTu;
+
+SELECT d.Slug, m.Ten, m.MaMuc, m.AnhPath
+FROM @DiaDiem AS d
+JOIN dbo.DichVuBangGiaMuc AS m ON m.DichVuId = d.DichVuId
+ORDER BY d.Slug, m.ThuTu, m.MaMuc;

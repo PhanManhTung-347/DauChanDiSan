@@ -30,7 +30,6 @@
     <Folder Include="Controllers\" />
     <Folder Include="Features\Experiences\" />
     <Folder Include="Features\CheckIns\" />
-    <Folder Include="Features\Discovery\" />
     <Folder Include="Features\Accounts\" />
     <Folder Include="Infrastructure\Gemini\" />
     <Folder Include="Infrastructure\Firebase\" />

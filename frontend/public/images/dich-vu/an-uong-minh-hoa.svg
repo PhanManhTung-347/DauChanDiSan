@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 480" role="img" aria-label="Minh họa ăn uống">
+  <rect width="800" height="480" fill="#ead8bd"/>
+  <path d="M0 0h800v480H0z" fill="none" stroke="#a5654c" stroke-width="19"/>
+  <path d="M36 64h728M36 384h728" stroke="#b78261" stroke-width="4"/>
+  <circle cx="400" cy="229" r="148" fill="#fff8e9" stroke="#bf885e" stroke-width="9"/>
+  <circle cx="400" cy="229" r="107" fill="#e9b878"/>
+  <path d="M339 250c36-68 117-52 126-10m-136-31c45-50 115-40 130 2m-121 64c55-40 103-26 117-9" stroke="#f8e7bb" stroke-width="12" fill="none" stroke-linecap="round"/>
+  <path d="M357 165l16 25m60-30l-14 29m48 46l-20 15" stroke="#6e8453" stroke-width="11" stroke-linecap="round"/>
+  <path d="M154 142v169m-16-169v63h32v-63m466 0c-19 19-24 52 0 70v99" stroke="#855042" stroke-width="8" fill="none" stroke-linecap="round"/>
+  <text x="32" y="438" fill="#46291f" font-family="sans-serif" font-size="23" letter-spacing="4">MINH HỌA ĂN UỐNG</text>
+</svg>

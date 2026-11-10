@@ -66,6 +66,10 @@ import {
   PartnerApplicationPage,
   PartnerApprovalPage,
 } from './features/experiences/PartnerApplications'
+import {
+  TravelDirectoryDetailPage,
+  TravelDirectoryPage,
+} from './features/travelDirectory/TravelDirectoryPages'
 import { FloatingAssistant } from './features/trips/FloatingAssistant'
 import { AssistantPage, TripsPage } from './features/trips/TripPages'
 import type { Role } from './shared/types'
@@ -156,6 +160,7 @@ function Layout() {
               <NavLink to="/" end>Trang chủ</NavLink>
               <NavLink to="/kham-pha">Khám phá</NavLink>
               <NavLink to="/trai-nghiem">Trải nghiệm</NavLink>
+              <NavLink to="/luu-tru-an-uong">Lưu trú &amp; Ăn uống</NavLink>
               <NavLink to="/nhiem-vu">Nhiệm vụ</NavLink>
               <NavLink to="/bang-xep-hang">
                 <Trophy size={15} /> Xếp hạng
@@ -314,6 +319,8 @@ export default function App() {
             <Route path="di-san/:slug" element={<HeritagePage />} />
             <Route path="trai-nghiem" element={<ExperiencesPage />} />
             <Route path="trai-nghiem/:slug" element={<ExperiencePage />} />
+            <Route path="luu-tru-an-uong" element={<TravelDirectoryPage />} />
+            <Route path="luu-tru-an-uong/:slug" element={<TravelDirectoryDetailPage />} />
             <Route path="nhiem-vu" element={<MissionsPage />} />
             <Route path="so-tay/chia-se/:code" element={<SharedJournalPage />} />
             <Route path="dang-nhap" element={<LoginPage key="login" />} />
